@@ -46,9 +46,29 @@ def pick_device(requested: str):
     return device, dtype
 
 
+def fetch_model(model_id: str) -> str:
+    """models/<名前> にダウンロードしてそのパスを返す。
+
+    HF 標準キャッシュはシンボリックリンクを作るため、権限のない Windows では失敗する。
+    local_dir に実ファイルで置けばリンク不要で、途中で止まっても再実行で続きから落とせる。
+    """
+    from huggingface_hub import snapshot_download
+
+    local = Path(__file__).parent / "models" / model_id.split("/")[-1]
+    for attempt in range(1, 11):
+        try:
+            return snapshot_download(model_id, local_dir=local)
+        except OSError as e:  # 回線が途中で切れても、落とした分は残るので再試行で続きから取れる
+            if attempt == 10:
+                raise
+            print(f"[warn] ダウンロード中断（{attempt}回目）。再試行します: {e}", file=sys.stderr)
+            time.sleep(5)
+
+
 def load_model(model_id: str, device: str, dtype):
     from qwen_tts import Qwen3TTSModel
 
+    model_id = fetch_model(model_id)
     kwargs = {"device_map": device, "dtype": dtype}
     if device.startswith("cuda"):
         try:

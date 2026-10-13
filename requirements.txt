@@ -1,3 +1,4 @@
 # torch / torchaudio は setup スクリプトが GPU に合わせて先に入れます
 qwen-tts==0.1.1
 soundfile
+hf_xet  # Hugging Face からのモデル取得を高速化

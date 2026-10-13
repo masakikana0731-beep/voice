@@ -3,3 +3,7 @@ __pycache__/
 outputs/
 *.wav
 !samples/*.wav
+setup.log
+dl.log
+models/
+speak.log
