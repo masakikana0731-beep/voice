@@ -7,3 +7,4 @@ setup.log
 dl.log
 models/
 speak.log
+.claude/settings.local.json
