@@ -1,4 +1,4 @@
-# Voice Studio を（必要なら）起動し、スマホ用リンクが開ける状態か確認して結果を表示する。
+﻿# Voice Studio を（必要なら）起動し、スマホ用リンクが開ける状態か確認して結果を表示する。
 # 使い方: powershell -NoProfile -ExecutionPolicy Bypass -File open-studio.ps1
 $ErrorActionPreference = "Continue"
 $root = $PSScriptRoot

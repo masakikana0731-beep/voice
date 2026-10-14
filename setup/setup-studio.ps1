@@ -1,4 +1,4 @@
-# Voice Studio（学習 + 声変換）用の追加セットアップ。先に setup.ps1 を実行しておくこと。
+﻿# Voice Studio（学習 + 声変換）用の追加セットアップ。先に setup.ps1 を実行しておくこと。
 # 使い方: powershell -ExecutionPolicy Bypass -File setup\setup-studio.ps1
 $ErrorActionPreference = "Continue"
 Set-Location (Split-Path $PSScriptRoot -Parent)
