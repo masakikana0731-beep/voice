@@ -60,7 +60,10 @@ def main() -> int:
                "--save-every", 500, "--num-workers", 0]
         if run_logged(cmd, log, cwd=SEEDVC, on_line=progress) != 0:
             return fail("声変換の学習")
-        write_status(vdir, vc_checkpoint=str(SEEDVC / "runs" / args.voice / "ft_model.pth"))
+        from studio.speakers import keep_vc_model
+
+        keep_vc_model(args.voice)  # 話者フォルダ（voices/<名前>/vc）にもまとめて保存
+        write_status(vdir, vc_checkpoint=str(vdir / "vc" / "ft_model.pth"))
 
     write_status(vdir, stage="done", message="すべての学習が完了しました", progress=1, pid=None)
     return 0

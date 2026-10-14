@@ -152,8 +152,9 @@ def convert(voice: str, source: str, steps: int = 50, auto_pitch: bool = True, s
     if not (vdir / "ref_hq.wav").exists():
         raise RuntimeError("まだ学習データの準備（または学習）をしていません")
     ref = vc_reference(vdir)
-    run = SEEDVC / "runs" / voice
-    ckpt = run / "ft_model.pth"
+    from studio.speakers import vc_model
+
+    model = vc_model(voice)
     t0 = time.time()
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -171,8 +172,8 @@ def convert(voice: str, source: str, steps: int = 50, auto_pitch: bool = True, s
         cmd = [str(VC_PY), str(ROOT / "studio" / "vc_run.py"), str(ROOT / "studio" / "vc_batch.py"),
                "--segments", str(seg_dir), "--target", str(ref), "--out", str(out_dir),
                "--diffusion-steps", str(steps), "--auto-f0-adjust", str(auto_pitch), "--semi-tone-shift", str(semitone)]
-        if ckpt.exists():
-            cmd += ["--checkpoint", str(ckpt), "--config", str(run / Path(VC_CONFIG).name)]
+        if model:
+            cmd += ["--checkpoint", str(model[0]), "--config", str(model[1])]
             how = "学習済みモデル"
         else:
             how = "未学習（参照音声からのゼロショット変換）"
