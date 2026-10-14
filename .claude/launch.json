@@ -4,7 +4,7 @@
     {
       "name": "voice-studio",
       "runtimeExecutable": "C:\\Users\\masak\\claude\\VOICE\\.venv\\Scripts\\python.exe",
-      "runtimeArgs": ["-m", "studio.app", "--no-browser"],
+      "runtimeArgs": ["-m", "studio.app", "--no-browser", "--local"],
       "port": 7860
     }
   ]

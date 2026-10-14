@@ -1,6 +1,7 @@
 """Voice Studio（ブラウザで使う UI）。
 
-  python -m studio.app        →  http://127.0.0.1:7860 が開く
+  python -m studio.app           →  https://<この PC の IP>:7860（スマホからも可。パスワード付き）
+  python -m studio.app --local   →  http://127.0.0.1:7860（この PC だけ）
 
   ⓪ 動画から声を抽出 動画・音声から BGM・効果音・残響・雑音を消して声だけにする
   ① 声を学習       なりたい声の録音を入れて、長時間学習させる
@@ -263,4 +264,20 @@ with gr.Blocks(title="Voice Studio") as demo:
 
 
 if __name__ == "__main__":
-    demo.queue().launch(inbrowser="--no-browser" not in sys.argv, allowed_paths=[str(ROOT / "outputs")])
+    opts = dict(allowed_paths=[str(ROOT / "outputs")])
+    if "--local" in sys.argv:  # この PC だけで使う
+        demo.queue().launch(inbrowser="--no-browser" not in sys.argv, **opts)
+    else:  # スマホなど同じ Wi-Fi の端末からも開ける（パスワード + HTTPS）
+        from studio import remote
+
+        ip, pw = remote.lan_ip(), remote.password()
+        crt, key = remote.cert(ip)
+        remote.show(f"https://{ip}:7860", pw)
+        if "--no-browser" not in sys.argv:
+            import threading
+            import webbrowser
+
+            threading.Timer(4, webbrowser.open, ["https://localhost:7860"]).start()
+        demo.queue().launch(server_name="0.0.0.0", server_port=7860, auth=(remote.USER, pw),
+                            auth_message="Voice Studio にログイン", ssl_certfile=crt, ssl_keyfile=key,
+                            ssl_verify=False, **opts)
