@@ -272,12 +272,13 @@ if __name__ == "__main__":
 
         ip, pw = remote.lan_ip(), remote.password()
         crt, key = remote.cert(ip)
-        remote.show(f"https://{ip}:7860", pw)
+        ts = remote.show(f"https://{ip}:7860", pw)
         if "--no-browser" not in sys.argv:
             import threading
             import webbrowser
 
-            threading.Timer(4, webbrowser.open, ["https://localhost:7860"]).start()
+            # Tailscale の URL は正式な証明書なので警告が出ない。なければ localhost（警告は出るが安全）
+            threading.Timer(4, webbrowser.open, [ts or "https://localhost:7860"]).start()
         demo.queue().launch(server_name="0.0.0.0", server_port=7860, auth=(remote.USER, pw),
                             auth_message="Voice Studio にログイン", ssl_certfile=crt, ssl_keyfile=key,
                             ssl_verify=False, **opts)

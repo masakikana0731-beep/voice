@@ -99,8 +99,8 @@ def show_qr(url: str) -> None:
     qr.print_ascii(invert=True)
 
 
-def show(url: str, pw: str) -> None:
-    """起動画面に、スマホで読み取れる QR コードとログイン情報を表示する。"""
+def show(url: str, pw: str) -> str | None:
+    """起動画面に、スマホで読み取れる QR コードとログイン情報を表示する。Tailscale の URL を返す。"""
     ts = tailscale_url()
     if ts:
         print("\n" + "=" * 60)
@@ -120,3 +120,4 @@ def show(url: str, pw: str) -> None:
     print("   「詳細設定」→「アクセスする」で進んでください（自分の PC なので安全です）。")
     print("=" * 60)
     show_qr(url)
+    return ts
