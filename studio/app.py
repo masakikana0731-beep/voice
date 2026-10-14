@@ -19,7 +19,7 @@ from pathlib import Path
 
 import gradio as gr
 
-from studio import engine
+from studio import engine, post
 from studio.common import ffmpeg, AUDIO_EXT, PY, ROOT, SEP_PY, VIDEO_EXT, child_env, list_voices, read_status, safe_name, voice_dir, write_status
 
 
@@ -239,7 +239,15 @@ def to_mp3(wav) -> str:
             f'⬇ スマホに保存する（{mp3.name}）</a>')
 
 
-def do_speak(voice, text, ckpt, instruct):
+def finish(raw, preset, reverb, echo, ambience, lips):
+    """仕上げ（リップノイズ・響き・環境）をかけて、試聴用・保存用を返す。"""
+    if not raw:
+        raise gr.Error("先に音声を作ってください")
+    fx = post.apply(raw, preset, reverb, echo, ambience, lips)
+    return str(fx), to_mp3(fx)
+
+
+def do_speak(voice, text, ckpt, instruct, *fx):
     if not voice or not text.strip():
         raise gr.Error("声と文章を入れてください")
     if any(_alive(read_status(voice_dir(v)).get("pid")) for v in list_voices()):
@@ -248,17 +256,31 @@ def do_speak(voice, text, ckpt, instruct):
         out, info = engine.speak(voice, text, None if ckpt.startswith("（") else ckpt, instruct)
     except Exception as e:
         raise gr.Error(str(e))
-    return str(out), to_mp3(out), info
+    return (*finish(str(out), *fx), info, str(out))
 
 
-def do_convert(voice, audio, steps, auto_pitch, semitone):
+def do_convert(voice, audio, steps, auto_pitch, semitone, *fx):
     if not voice or not audio:
         raise gr.Error("声を選び、録音してください")
     try:
         out, info = engine.convert(voice, audio, int(steps), auto_pitch, int(semitone))
     except Exception as e:
         raise gr.Error(str(e))
-    return str(out), to_mp3(out), info
+    return (*finish(str(out), *fx), info, str(out))
+
+
+def finish_controls():
+    """仕上げの設定欄（②③共通）。"""
+    with gr.Accordion("仕上げ（リップノイズ・響き・環境）", open=False):
+        preset = gr.Dropdown(post.PRESETS, value="なし", label="環境（プリセット）")
+        with gr.Row():
+            lips = gr.Slider(0, 100, value=30, step=5, label="リップノイズ（話し始めの口の音）")
+            reverb = gr.Slider(0, 100, value=0, step=5, label="リバーブ（響き）")
+        with gr.Row():
+            echo = gr.Slider(0, 100, value=0, step=5, label="エコー（やまびこ）")
+            ambience = gr.Slider(0, 100, value=0, step=5, label="環境音（空気感）")
+        redo = gr.Button("仕上げだけやり直す（変換し直さずに、この設定をかけ直す）")
+    return [preset, reverb, echo, ambience, lips], redo
 
 
 CSS = ".tab-wrapper button { padding: 0 8px !important; }"
@@ -321,10 +343,12 @@ with gr.Blocks(title="Voice Studio") as demo:
             ckpt = gr.Dropdown(label="モデル（一番上が採点で一番良かったもの）", scale=2)
             reload_ckpt = gr.Button("一覧を更新", scale=1)
         instruct = gr.Textbox(label="話し方の指示（任意。学習済みモデルでは効かないことがあります）", placeholder="例: 嬉しそうに")
+        speak_fx, speak_redo = finish_controls()
         speak_btn = gr.Button("読み上げる", variant="primary")
         speak_out = gr.Audio(label="結果", type="filepath")
         speak_file = gr.HTML()
         speak_info = gr.Markdown()
+        speak_raw = gr.State(None)
 
     with gr.Tab("③声変換"):
         gr.Markdown("### ③ 自分の声で抑揚指定\n自分で、つけたい抑揚・間・感情のとおりに読んで録音してください。声だけが学習した声に変わります。")
@@ -332,11 +356,13 @@ with gr.Blocks(title="Voice Studio") as demo:
         with gr.Row():
             auto_pitch = gr.Checkbox(True, label="声の高さを学習した声に合わせる（男女差があるときはオン）")
             semitone = gr.Slider(-12, 12, value=0, step=1, label="高さの微調整（半音）")
-            steps = gr.Slider(10, 100, value=30, step=5, label="品質（多いほど高品質・遅い）")
+            steps = gr.Slider(10, 100, value=50, step=5, label="品質（多いほど高品質・遅い）")
+        conv_fx, conv_redo = finish_controls()
         conv_btn = gr.Button("変換する", variant="primary")
         conv_out = gr.Audio(label="結果", type="filepath")
         conv_file = gr.HTML()
         conv_info = gr.Markdown()
+        conv_raw = gr.State(None)
 
     spk_outputs = [x for pair in zip(spk_audio, spk_check) for x in pair]
     job_outputs = [sep_info, sep_out, sep_paths, sep_shown] + spk_outputs
@@ -351,8 +377,11 @@ with gr.Blocks(title="Voice Studio") as demo:
     stop_btn.click(stop_training, voice, status)
     gr.Timer(5).tick(refresh, voice, [status, log])
     reload_ckpt.click(ckpt_choices, voice, ckpt)
-    speak_btn.click(do_speak, [voice, text, ckpt, instruct], [speak_out, speak_file, speak_info])
-    conv_btn.click(do_convert, [voice, src, steps, auto_pitch, semitone], [conv_out, conv_file, conv_info])
+    speak_btn.click(do_speak, [voice, text, ckpt, instruct] + speak_fx, [speak_out, speak_file, speak_info, speak_raw])
+    speak_redo.click(finish, [speak_raw] + speak_fx, [speak_out, speak_file])
+    conv_btn.click(do_convert, [voice, src, steps, auto_pitch, semitone] + conv_fx,
+                   [conv_out, conv_file, conv_info, conv_raw])
+    conv_redo.click(finish, [conv_raw] + conv_fx, [conv_out, conv_file])
     demo.load(lambda: gr.update(choices=sep_jobs(), value=(sep_jobs() or [(None, None)])[0][1]), None, sep_job)
     demo.load(raw_summary, voice, raw_info).then(refresh, voice, [status, log]).then(ckpt_choices, voice, ckpt)
 

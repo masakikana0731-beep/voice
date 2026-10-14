@@ -7,6 +7,8 @@ import threading
 import time
 from pathlib import Path
 
+import numpy as np
+
 from studio.common import ROOT, SEEDVC, SPEAKER, VC_CONFIG, VC_PY, VOICES, child_env, ffmpeg, read_status
 
 OUT = ROOT / "outputs"
@@ -83,39 +85,119 @@ def speak(voice: str, text: str, checkpoint: str | None, instruct: str = "", sub
     return out, f"{how} / {time.time() - t0:.1f}秒"
 
 
-def convert(voice: str, source: str, steps: int = 30, auto_pitch: bool = True, semitone: int = 0) -> tuple[Path, str]:
-    """録音を学習した声に変換する。抑揚（声の高さの動き）・間はそのまま残る。"""
+SR_VC = 44100
+
+
+def vc_reference(vdir: Path, target_sec: float = 12.0) -> Path:
+    """声変換の参照音声（約 12 秒）。1 クリップ（約 8 秒）だけより、声の特徴をつかみやすい。
+
+    Seed-VC は「参照 + 変換する区間」を 30 秒の窓で処理するので、参照は 12 秒程度に抑える。
+    """
+    import numpy as np
+    import soundfile as sf
+
+    ref = vdir / "ref_vc.wav"
+    if ref.exists() and ref.stat().st_mtime >= (vdir / "ref_hq.wav").stat().st_mtime:
+        return ref
+    pieces, total = [], 0.0
+    files = [vdir / "ref_hq.wav"] + sorted((vdir / "clips_hq").glob("*.wav"))
+    used = set()
+    for f in files:
+        if f.name in used or total >= target_sec:
+            continue
+        y, sr = sf.read(f, dtype="float32")
+        if y.ndim > 1:
+            y = y.mean(axis=1)
+        if not 3 <= len(y) / sr <= 10 or np.sqrt((y ** 2).mean()) < 0.02:  # 短すぎ・小さすぎる区間は使わない
+            continue
+        pieces += [y, np.zeros(int(0.2 * sr), dtype=np.float32)]
+        total += len(y) / sr
+        used.add(f.name)
+    sf.write(ref, np.concatenate(pieces)[: int(14 * SR_VC)], SR_VC)
+    return ref
+
+
+def split_at_silence(y, sr, max_sec: float = 15.0):
+    """無音のところで区切って max_sec 以下の区間にする（区切りは無音の真ん中）。"""
+    import librosa
+
+    iv = librosa.effects.split(y, top_db=35, frame_length=2048, hop_length=512)
+    if len(iv) == 0:
+        return [(0, len(y))]
+    cuts = [0]
+    seg_start = 0
+    for (s0, e0), (s1, _) in zip(iv[:-1], iv[1:]):
+        mid = (e0 + s1) // 2  # 声と声のあいだ（無音）の真ん中
+        if s1 - seg_start > max_sec * sr and mid > seg_start:
+            cuts.append(mid)
+            seg_start = mid
+    cuts.append(len(y))
+    out = []
+    for s0, e0 in zip(cuts[:-1], cuts[1:]):
+        # 無音なしで max_sec を超える長い発話は、仕方なく等分する
+        n = max(1, int(np.ceil((e0 - s0) / (max_sec * sr))))
+        step = (e0 - s0) // n
+        out += [(s0 + i * step, e0 if i == n - 1 else s0 + (i + 1) * step) for i in range(n)]
+    return out
+
+
+def convert(voice: str, source: str, steps: int = 50, auto_pitch: bool = True, semitone: int = 0) -> tuple[Path, str]:
+    """録音を学習した声に変換する。抑揚（声の高さの動き）・間はそのまま残る。
+
+    無音で 15 秒以下に区切って変換し、つなぎ直す（Seed-VC 内部の区切りで音が途切れるのを防ぐ）。
+    """
+    import soundfile as sf
+
     vdir = VOICES / voice
-    ref = vdir / "ref_hq.wav"
-    if not ref.exists():
+    if not (vdir / "ref_hq.wav").exists():
         raise RuntimeError("まだ学習データの準備（または学習）をしていません")
+    ref = vc_reference(vdir)
     run = SEEDVC / "runs" / voice
     ckpt = run / "ft_model.pth"
-    cmd = [str(VC_PY), str(ROOT / "studio" / "vc_run.py"), "inference.py", "--source", source, "--target", str(ref),
-           "--diffusion-steps", str(steps), "--f0-condition", "True",
-           "--auto-f0-adjust", str(auto_pitch), "--semi-tone-shift", str(semitone)]
-    if ckpt.exists():
-        cmd += ["--checkpoint", str(ckpt), "--config", str(run / Path(VC_CONFIG).name)]
-        how = "学習済みモデル"
-    else:
-        how = "未学習（参照音声からのゼロショット変換）"
     t0 = time.time()
     with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
         # ブラウザ録音（webm 等）でも読めるよう、先に wav へ変換しておく
-        src_wav = Path(tmp) / "source.wav"
-        subprocess.run([ffmpeg(), "-v", "error", "-y", "-i", str(Path(source).resolve()), "-ac", "1", "-ar", "44100",
+        src_wav = tmp / "source.wav"
+        subprocess.run([ffmpeg(), "-v", "error", "-y", "-i", str(Path(source).resolve()), "-ac", "1", "-ar", str(SR_VC),
                         str(src_wav)], check=True)
-        cmd[cmd.index(source)] = str(src_wav)
-        p = subprocess.run(cmd + ["--output", tmp], cwd=SEEDVC, env=child_env(),
-                           capture_output=True, text=True, encoding="utf-8", errors="replace")
-        # tmp には入力の source.wav も置いてあるので、Seed-VC の出力（vc_*.wav）だけを拾う
-        wavs = list(Path(tmp).glob("vc_*.wav"))
-        if p.returncode != 0 or not wavs:
+        y, sr = sf.read(src_wav, dtype="float32")
+        seg_dir, out_dir = tmp / "segments", tmp / "converted"
+        seg_dir.mkdir()
+        spans = split_at_silence(y, sr)
+        for i, (s0, e0) in enumerate(spans):
+            sf.write(seg_dir / f"{i:03d}.wav", y[s0:e0], sr)
+
+        cmd = [str(VC_PY), str(ROOT / "studio" / "vc_run.py"), str(ROOT / "studio" / "vc_batch.py"),
+               "--segments", str(seg_dir), "--target", str(ref), "--out", str(out_dir),
+               "--diffusion-steps", str(steps), "--auto-f0-adjust", str(auto_pitch), "--semi-tone-shift", str(semitone)]
+        if ckpt.exists():
+            cmd += ["--checkpoint", str(ckpt), "--config", str(run / Path(VC_CONFIG).name)]
+            how = "学習済みモデル"
+        else:
+            how = "未学習（参照音声からのゼロショット変換）"
+        p = subprocess.run(cmd, cwd=SEEDVC, env=child_env(), capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+        outs = [out_dir / f"{i:03d}.wav" for i in range(len(spans))]
+        if p.returncode != 0 or not all(f.exists() for f in outs):
             raise RuntimeError("声変換に失敗しました:\n" + (p.stdout + p.stderr)[-1500:])
+
+        # つなぎ目は無音の中なので、10ms だけ重ねてなめらかにつなぐ
+        fade = int(0.01 * sr)
+        joined = None
+        for f in outs:
+            z, zsr = sf.read(f, dtype="float32")
+            if z.ndim > 1:
+                z = z.mean(axis=1)
+            if joined is None or len(z) <= fade or len(joined) <= fade:
+                joined = z if joined is None else np.concatenate([joined, z])
+                continue
+            w = np.linspace(0, 1, fade, dtype=np.float32)
+            joined = np.concatenate([joined[:-fade], joined[-fade:] * (1 - w) + z[:fade] * w, z[fade:]])
         out = OUT / voice / f"vc_{time.strftime('%Y%m%d-%H%M%S')}.wav"
         out.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(wavs[0]), out)
-    return out, f"{how} / {time.time() - t0:.1f}秒"
+        sf.write(out, joined, zsr)
+    return out, f"{how} / {len(spans)} 区間 / {time.time() - t0:.1f}秒"
 
 
 def status_text(voice: str) -> str:
