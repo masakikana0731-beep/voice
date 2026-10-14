@@ -12,12 +12,14 @@ ROOT = Path(__file__).resolve().parent.parent
 VOICES = ROOT / "voices"
 PY = ROOT / ".venv" / "Scripts" / "python.exe"
 VC_PY = ROOT / ".venv-vc" / "Scripts" / "python.exe"
+SEP_PY = ROOT / ".venv-sep" / "Scripts" / "python.exe"
 SEEDVC = ROOT / "third_party" / "seed-vc"
 QWEN_FT = ROOT / "third_party" / "Qwen3-TTS" / "finetuning"
 # F0（声の高さの動き）を条件にするモデル。元の録音の抑揚をそのまま保てる
 VC_CONFIG = "configs/presets/config_dit_mel_seed_uvit_whisper_base_f0_44k.yml"
 SPEAKER = "target"
 
+VIDEO_EXT = (".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv", ".wmv", ".m4v", ".ts")
 AUDIO_EXT = (".wav", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".mp4", ".webm")
 
 if str(ROOT) not in sys.path:

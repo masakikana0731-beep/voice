@@ -11,3 +11,4 @@ speak.log
 third_party/
 voices/
 .venv-vc/
+.venv-sep/

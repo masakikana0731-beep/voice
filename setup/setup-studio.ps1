@@ -30,5 +30,16 @@ Get-Content third_party\seed-vc\requirements.txt |
     Set-Content -Encoding utf8 third_party\seed-vc-req.txt
 Invoke-Checked uv pip install --python .\.venv-vc\Scripts\python.exe -r third_party\seed-vc-req.txt hf_xet
 
+# 声の抽出（⓪ タブ）: audio-separator（UVR のモデル）+ 話者分け + YouTube ダウンロード。別環境 .venv-sep
+$py12 = Get-ChildItem "$env:APPDATA\uv\python\cpython-3.12.*-windows-x86_64-none\python.exe" |
+    Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+Invoke-Checked uv venv --allow-existing --python $py12 .venv-sep
+Invoke-Checked uv pip install --python .\.venv-sep\Scripts\python.exe torch==2.11.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu128
+Invoke-Checked uv pip install --python .\.venv-sep\Scripts\python.exe "audio-separator[gpu]" audioread speechbrain scikit-learn yt-dlp hf_xet
+# yt-dlp が YouTube を読むのに JavaScript 実行環境（deno）が要る
+if (-not (Get-Command deno -ErrorAction SilentlyContinue)) {
+    winget install --id DenoLand.Deno -e --source winget --accept-package-agreements --accept-source-agreements --disable-interactivity
+}
+
 Write-Host ""
 Write-Host "[setup] 完了。start-studio.bat をダブルクリックすると Voice Studio が開きます。"

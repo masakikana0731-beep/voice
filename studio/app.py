@@ -2,21 +2,24 @@
 
   python -m studio.app        →  http://127.0.0.1:7860 が開く
 
+  ⓪ 動画から声を抽出 動画・音声から BGM・効果音・残響・雑音を消して声だけにする
   ① 声を学習       なりたい声の録音を入れて、長時間学習させる
   ② 文章から読み上げ 学習した声で文章を読む
   ③ 自分の声で抑揚指定 自分で読んだ録音を、学習した声に変換（抑揚・間はそのまま）
 """
 
 import ctypes
+import json
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import gradio as gr
 
 from studio import engine
-from studio.common import AUDIO_EXT, PY, ROOT, child_env, list_voices, read_status, safe_name, voice_dir, write_status
+from studio.common import AUDIO_EXT, PY, ROOT, SEP_PY, VIDEO_EXT, child_env, list_voices, read_status, safe_name, voice_dir, write_status
 
 
 def _alive(pid) -> bool:
@@ -102,6 +105,57 @@ def ckpt_choices(voice):
     return gr.update(choices=names + ["（未学習のクローン）"], value=names[0] if names else "（未学習のクローン）")
 
 
+MAX_SPK = 5
+
+
+def do_separate(files, urls, dereverb, denoise, speakers):
+    inputs = list(files or []) + [u.strip() for u in (urls or "").splitlines() if u.strip()]
+    if not inputs:
+        raise gr.Error("動画・音声ファイルか、YouTube の URL を入れてください")
+    engine.unload()
+    out_dir = ROOT / "outputs" / "separated" / time.strftime("%Y%m%d-%H%M%S")
+    mode = {"分けない": "off", "自動": "auto"}.get(speakers, speakers.rstrip("人"))
+    cmd = [str(SEP_PY), "-m", "studio.separate", *inputs, "-o", str(out_dir), "--speakers", mode]
+    if not dereverb:
+        cmd.append("--no-dereverb")
+    if not denoise:
+        cmd.append("--no-denoise")
+    t0 = time.time()
+    p = subprocess.run(cmd, cwd=ROOT, env=child_env(), capture_output=True, text=True, encoding="utf-8", errors="replace")
+    outs = sorted(str(f) for f in out_dir.glob("*_voice.wav"))
+    if p.returncode != 0 or not outs:
+        raise gr.Error("抽出に失敗しました: " + (p.stdout + p.stderr)[-800:])
+
+    spk_json = out_dir / "speakers" / "speakers.json"
+    spk = json.loads(spk_json.read_text(encoding="utf-8")) if spk_json.exists() else []
+    # 話者ごとの枠（最大 5）。話者分けしないときは抽出結果をそのまま 1 枠目に出す
+    slots = spk or [{"file": f, "seconds": None} for f in outs]
+    updates = []
+    for i in range(MAX_SPK):
+        if i < len(slots):
+            sec = slots[i]["seconds"]
+            label = f"話者{i + 1}（{sec:.0f}秒）" if sec is not None else Path(slots[i]["file"]).name
+            updates += [gr.update(value=slots[i]["file"], label=label, visible=True),
+                        gr.update(value=(i == 0), label=f"{label} を残す", visible=True)]
+        else:
+            updates += [gr.update(value=None, visible=False), gr.update(value=False, visible=False)]
+    msg = f"抽出完了（{time.time() - t0:.0f}秒）。" + (f"{len(spk)} 人に分けました。残したい人にチェックしてください。" if spk else "")
+    return [msg, outs + [s["file"] for s in spk], [s["file"] for s in slots]] + updates
+
+
+def add_separated(voice, paths, *checks):
+    if not voice:
+        raise gr.Error("先に上の「使う声」を選ぶか作ってください")
+    chosen = [f for f, c in zip(paths or [], checks) if c]
+    if not chosen:
+        raise gr.Error("残す人にチェックを入れてください")
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    for f in chosen:
+        shutil.copy(f, voice_dir(voice) / "raw" / f"{stamp}_{Path(f).name}")
+    gr.Info(f"「{voice}」の学習データに {len(chosen)} 本追加しました")
+    return raw_summary(voice)
+
+
 def do_speak(voice, text, ckpt, instruct):
     if not voice or not text.strip():
         raise gr.Error("声と文章を入れてください")
@@ -130,6 +184,29 @@ with gr.Blocks(title="Voice Studio") as demo:
         voice = gr.Dropdown(list_voices(), value=(list_voices() or [None])[0], label="使う声", scale=2)
         new_name = gr.Textbox(label="新しい声の名前", placeholder="例: narrator", scale=2)
         new_btn = gr.Button("作成", scale=1)
+
+    with gr.Tab("⓪ 動画から声を抽出"):
+        gr.Markdown("動画・音声ファイル、または **YouTube の URL** から、BGM・効果音・残響・雑音を消して声だけを取り出し、"
+                    "**話している人ごとに分けます**。聞き比べて、残したい人だけを学習データに追加できます。")
+        with gr.Row():
+            sep_files = gr.File(file_count="multiple", file_types=list(VIDEO_EXT + AUDIO_EXT), label="動画・音声ファイル")
+            sep_urls = gr.Textbox(label="YouTube などの URL（1行に1つ。複数可）", lines=4,
+                                  placeholder="https://www.youtube.com/watch?v=...")
+        with gr.Row():
+            speakers = gr.Dropdown(["自動", "1人", "2人", "3人", "4人", "5人", "分けない"], value="自動",
+                                   label="話している人数（自動でずれたら指定）")
+            dereverb = gr.Checkbox(True, label="残響（エコー）も消す")
+            denoise = gr.Checkbox(True, label="雑音も消す")
+        sep_btn = gr.Button("声を抽出する", variant="primary")
+        sep_info = gr.Markdown()
+        spk_audio, spk_check = [], []
+        for i in range(MAX_SPK):
+            with gr.Row():
+                spk_audio.append(gr.Audio(type="filepath", visible=False, scale=4))
+                spk_check.append(gr.Checkbox(False, visible=False, scale=1))
+        sep_paths = gr.State([])
+        sep_add = gr.Button("チェックした人を「使う声」の学習データに追加", variant="primary")
+        sep_out = gr.File(label="抽出したファイル（ダウンロード可）", file_count="multiple")
 
     with gr.Tab("① 声を学習"):
         gr.Markdown("なりたい声の録音を入れてください。**合計30分〜1時間**あると良いです（最低10分）。"
@@ -170,6 +247,9 @@ with gr.Blocks(title="Voice Studio") as demo:
         conv_out = gr.Audio(label="結果", type="filepath")
         conv_info = gr.Markdown()
 
+    spk_outputs = [x for pair in zip(spk_audio, spk_check) for x in pair]
+    sep_btn.click(do_separate, [sep_files, sep_urls, dereverb, denoise, speakers], [sep_info, sep_out, sep_paths] + spk_outputs)
+    sep_add.click(add_separated, [voice, sep_paths] + spk_check, raw_info)
     new_btn.click(create_voice, new_name, [voice, new_name])
     voice.change(raw_summary, voice, raw_info).then(refresh, voice, [status, log]).then(ckpt_choices, voice, ckpt)
     add_btn.click(add_files, [voice, files], [raw_info, files])
