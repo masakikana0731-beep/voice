@@ -47,6 +47,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("voice")
     ap.add_argument("--dir", default="tts", help="採点するフォルダ（voices/<名前>/ 以下）")
+    ap.add_argument("--sim", action="store_true", help="（テスト機能）声の近さも採点に入れる")
     args = ap.parse_args()
     vdir = VOICES / args.voice
     ckpts = [p.name for p in sorted((vdir / args.dir).glob("epoch-*"), reverse=True)]
@@ -74,9 +75,33 @@ def main() -> int:
         result[ck] = {"cer": round(sum(scores) / len(scores), 3), "texts": texts}
         print(f"[eval] {ck} 文字誤り率 {result[ck]['cer']:.2f} | {texts[0][:30]}", flush=True)
 
+    if args.sim:
+        # （テスト機能）生成した声が登録済みの声にどれだけ近いか。読めていても別人の声なら減点する
+        import subprocess
+
+        from studio.common import ROOT, SEP_PY, child_env
+
+        files = [str(f) for fs in wavs.values() for f in fs]
+        raws = [str(f) for f in (vdir / "raw").glob("*.wav")]
+        sj = vdir / args.dir / "sim.json"
+        subprocess.run([str(SEP_PY), "-m", "studio.purity", "files", *files, "--ref", *raws, "-o", str(sj)],
+                       cwd=ROOT, env=child_env(), check=True)
+        sims = json.loads(sj.read_text(encoding="utf-8"))
+        from pathlib import Path
+
+        for ck, fs in wavs.items():
+            sim = sum(sims[Path(f).name] for f in fs) / len(fs)
+            result[ck]["sim"] = round(sim, 3)
+            # 誤り率に、近さの不足分（0.75 を下回った分）を足して総合点にする（小さいほど良い）
+            result[ck]["score"] = round(result[ck]["cer"] + max(0.0, 0.75 - sim), 3)
+            print(f"[eval] {ck} 声の近さ {sim:.2f} / 総合 {result[ck]['score']:.2f}", flush=True)
+
     (vdir / args.dir / "eval.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     # 誤り率が同じくらいなら新しい（よく学習した）ほうを選ぶ
-    best = min(result, key=lambda c: (round(result[c]["cer"], 1), ckpts.index(c)))  # ckpts は新しい順
+    if args.sim:
+        best = min(result, key=lambda c: (result[c]["score"], ckpts.index(c)))
+    else:
+        best = min(result, key=lambda c: (round(result[c]["cer"], 1), ckpts.index(c)))  # ckpts は新しい順
     if result[best]["cer"] > 0.5:
         # どれも読めていない → 使わない（画面では参照音声からのクローンで読み上げる）
         for ck in ckpts:

@@ -96,6 +96,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("voice")
     ap.add_argument("--language", default="japanese")
+    ap.add_argument("--purity", type=float, default=0, help="（テスト機能）登録済みの声との近さがこれ未満のクリップを除外。0 で無効")
     args = ap.parse_args()
 
     vdir = VOICES / args.voice
@@ -141,6 +142,20 @@ def main() -> int:
 
     # 書き起こしに失敗したクリップは学習に使わない
     dropped = []
+    if args.purity > 0:
+        # （テスト機能）相手の声などが混ざったクリップを、話者の近さで見つけて除外する
+        import subprocess
+
+        from studio.common import ROOT, SEP_PY, child_env
+
+        pj = vdir / "purity.json"
+        subprocess.run([str(SEP_PY), "-m", "studio.purity", "clips", str(vdir / "clips_hq"),
+                        "--ref", *[str(r) for r in raws], "-o", str(pj)], cwd=ROOT, env=child_env(), check=True)
+        purity = json.loads(pj.read_text(encoding="utf-8"))
+        for i, (n, _) in enumerate(clips):
+            if texts[i] and purity.get(n, 1) < args.purity:
+                dropped.append(f"{n}: 別の声が混ざっている（近さ {purity[n]:.2f}）")
+                texts[i] = ""
     for i, ((n, d), t) in enumerate(zip(clips, texts)):
         why = bad_transcript(t, d)
         if why:

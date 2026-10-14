@@ -19,6 +19,8 @@ def main() -> int:
     ap.add_argument("--tts-epochs", type=int, default=3)
     ap.add_argument("--vc-steps", type=int, default=3000)
     ap.add_argument("--vc-batch", type=int, default=1, help="12GB の GPU では 1（2 だとメモリがあふれて極端に遅くなる）")
+    ap.add_argument("--purity", type=float, default=0, help="（テスト機能）混ざりの除外のしきい値")
+    ap.add_argument("--eval-sim", action="store_true", help="（テスト機能）採点に声の近さも使う")
     ap.add_argument("--skip", action="append", default=[], choices=["prep", "tts", "vc"])
     args = ap.parse_args()
 
@@ -30,7 +32,7 @@ def main() -> int:
         write_status(vdir, stage="error", error=f"{what}で失敗しました。train.log を確認してください", pid=None)
         return 1
 
-    if "prep" not in args.skip and run_logged([PY, "-m", "studio.prep", args.voice], log) != 0:
+    if "prep" not in args.skip and run_logged([PY, "-m", "studio.prep", args.voice, "--purity", args.purity], log) != 0:
         return fail("データ準備")
 
     if "tts" not in args.skip:
@@ -39,7 +41,7 @@ def main() -> int:
         if run_logged(cmd, log) != 0:
             return fail("文章読み上げの学習")
         # 学習しすぎで壊れることがあるので、各周を採点して一番よく読めるものを選ぶ
-        if run_logged([PY, "-m", "studio.eval_tts", args.voice], log) != 0:
+        if run_logged([PY, "-m", "studio.eval_tts", args.voice] + (["--sim"] if args.eval_sim else []), log) != 0:
             return fail("読み上げモデルの採点")
 
     if "vc" not in args.skip:

@@ -36,6 +36,46 @@ def _alive(pid) -> bool:
     return code.value == 259  # STILL_ACTIVE
 
 
+FEATURES = ROOT / ".studio" / "features.json"
+
+
+def test_mode() -> bool:
+    try:
+        return bool(json.loads(FEATURES.read_text(encoding="utf-8")).get("test_mode"))
+    except (OSError, ValueError):
+        return False
+
+
+def set_test_mode(on):
+    FEATURES.parent.mkdir(exist_ok=True)
+    FEATURES.write_text(json.dumps({"test_mode": bool(on)}), encoding="utf-8")
+    return [gr.update(visible=bool(on))] * 4
+
+
+def disk_usage():
+    sep = sum(f.stat().st_size for f in SEP_DIR.rglob("*") if f.is_file()) if SEP_DIR.exists() else 0
+    allout = sum(f.stat().st_size for f in OUTPUTS.rglob("*") if f.is_file())
+    return f"outputs 全体: {allout / 1e9:.1f}GB（うち抽出結果: {sep / 1e9:.1f}GB）"
+
+
+def cleanup_separated(days):
+    """（テスト機能）古い抽出結果の大きいファイル（全員分の声 *_voice.wav）を消す。話者別のファイルは残す。"""
+    limit = time.time() - float(days) * 86400
+    freed = 0
+    for f in SEP_DIR.glob("*/*_voice.wav"):
+        if f.stat().st_mtime < limit:
+            freed += f.stat().st_size
+            f.unlink()
+    gr.Info(f"{freed / 1e9:.2f}GB 空けました")
+    return disk_usage()
+
+
+def start_realtime():
+    """（テスト機能）リアルタイム声変換の画面を PC 上に開く。"""
+    subprocess.Popen(["cmd", "/c", "start", "", str(ROOT / "realtime-vc.bat")], cwd=ROOT)
+    gr.Info("PC の画面にリアルタイム声変換が開きます（初回はモデルの準備に数分かかります）")
+
+
 def raw_summary(voice):
     if not voice:
         return "声を選ぶか、新しく作ってください"
@@ -61,7 +101,7 @@ def add_files(voice, files):
     return raw_summary(voice), None
 
 
-def start_training(voice, size, tts_epochs, vc_steps, do_tts, do_vc):
+def start_training(voice, size, tts_epochs, vc_steps, do_tts, do_vc, use_purity=False, purity=0.55, eval_sim=False):
     if not voice:
         raise gr.Error("先に声を選んでください")
     vdir = voice_dir(voice)
@@ -75,6 +115,10 @@ def start_training(voice, size, tts_epochs, vc_steps, do_tts, do_vc):
         cmd += ["--skip", "tts"]
     if not do_vc:
         cmd += ["--skip", "vc"]
+    if test_mode() and use_purity:
+        cmd += ["--purity", str(purity)]
+    if test_mode() and eval_sim:
+        cmd += ["--eval-sim"]
     engine.unload()  # 読み上げ用モデルが GPU を占有していると学習が極端に遅くなる
     # UI を閉じても学習が続くよう、独立したプロセスとして起動
     flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
@@ -247,13 +291,17 @@ def finish(raw, preset, reverb, echo, ambience, lips):
     return str(fx), to_mp3(fx)
 
 
-def do_speak(voice, text, ckpt, instruct, *fx):
+def do_speak(voice, text, ckpt, instruct, chain_vc, *fx):
     if not voice or not text.strip():
         raise gr.Error("声と文章を入れてください")
     if any(_alive(read_status(voice_dir(v)).get("pid")) for v in list_voices()):
         gr.Warning("学習中です。読み上げも学習も遅くなります")
     try:
         out, info = engine.speak(voice, text, None if ckpt.startswith("（") else ckpt, instruct)
+        if test_mode() and chain_vc:
+            # （テスト機能）読み上げた音声に声変換をもう一度かけて、声を近づける
+            out, info2 = engine.convert(voice, str(out))
+            info += f" → 声変換で仕上げ（{info2}）"
     except Exception as e:
         raise gr.Error(str(e))
     return (*finish(str(out), *fx), info, str(out))
@@ -291,6 +339,7 @@ with gr.Blocks(title="Voice Studio") as demo:
         voice = gr.Dropdown(list_voices(), value=(list_voices() or [None])[0], label="使う声", scale=2)
         new_name = gr.Textbox(label="新しい声の名前", placeholder="例: narrator", scale=2)
         new_btn = gr.Button("作成", scale=1)
+    test_sw = gr.Checkbox(test_mode(), label="🧪 テストモード（試験中の機能を表示する）")
 
     with gr.Tab("⓪抽出"):
         gr.Markdown("### ⓪ 動画から声を抽出\n動画・音声ファイル、または **YouTube の URL** から、BGM・効果音・残響・雑音を消して声だけを取り出し、"
@@ -317,6 +366,12 @@ with gr.Blocks(title="Voice Studio") as demo:
         sep_shown = gr.State(None)
         sep_add = gr.Button("チェックした人を「使う声」の学習データに追加", variant="primary")
         sep_out = gr.File(label="抽出したファイル（ダウンロード可）", file_count="multiple")
+        with gr.Group(visible=test_mode()) as t0:
+            gr.Markdown("**🧪 ディスクの整理**（抽出結果の大きいファイルを消す。話者別のファイルは残す）")
+            with gr.Row():
+                clean_days = gr.Slider(0, 30, value=7, step=1, label="何日より前のものを消すか")
+                clean_btn = gr.Button("整理する")
+            disk_info = gr.Markdown(disk_usage())
 
     with gr.Tab("①学習"):
         gr.Markdown("### ① 声を学習\nなりたい声の録音を入れてください。**合計30分〜1時間**あると良いです（最低10分）。"
@@ -330,6 +385,12 @@ with gr.Blocks(title="Voice Studio") as demo:
             vc_steps = gr.Slider(500, 20000, value=3000, step=500, label="声変換の学習ステップ数")
             do_tts = gr.Checkbox(True, label="文章読み上げ（②）を学習する")
             do_vc = gr.Checkbox(True, label="声変換（③）を学習する")
+        with gr.Group(visible=test_mode()) as t1:
+            gr.Markdown("**🧪 テスト機能**")
+            with gr.Row():
+                use_purity = gr.Checkbox(False, label="学習データの混ざり（相手の声など）を除外")
+                purity = gr.Slider(0.3, 0.8, value=0.55, step=0.05, label="この近さ未満のクリップを除外")
+            eval_sim = gr.Checkbox(False, label="読み上げモデルの採点に「声の近さ」も使う")
         with gr.Row():
             start_btn = gr.Button("学習スタート", variant="primary")
             stop_btn = gr.Button("止める", variant="stop")
@@ -343,6 +404,8 @@ with gr.Blocks(title="Voice Studio") as demo:
             ckpt = gr.Dropdown(label="モデル（一番上が採点で一番良かったもの）", scale=2)
             reload_ckpt = gr.Button("一覧を更新", scale=1)
         instruct = gr.Textbox(label="話し方の指示（任意。学習済みモデルでは効かないことがあります）", placeholder="例: 嬉しそうに")
+        with gr.Group(visible=test_mode()) as t2:
+            chain_vc = gr.Checkbox(False, label="🧪 声変換で仕上げる（読み上げ後に③をかけて声を近づける。時間は2倍ほど）")
         speak_fx, speak_redo = finish_controls()
         speak_btn = gr.Button("読み上げる", variant="primary")
         speak_out = gr.Audio(label="結果", type="filepath")
@@ -357,6 +420,10 @@ with gr.Blocks(title="Voice Studio") as demo:
             auto_pitch = gr.Checkbox(True, label="声の高さを学習した声に合わせる（男女差があるときはオン）")
             semitone = gr.Slider(-12, 12, value=0, step=1, label="高さの微調整（半音）")
             steps = gr.Slider(10, 100, value=50, step=5, label="品質（多いほど高品質・遅い）")
+        with gr.Group(visible=test_mode()) as t3:
+            gr.Markdown("**🧪 リアルタイム声変換**（PC のマイクに話すと、その場で声が変わる。PC の画面で操作。"
+                        "Reference Audio に `voices/<名前>/ref_vc.wav` を選んでください）")
+            rt_btn = gr.Button("PC でリアルタイム声変換を開く")
         conv_fx, conv_redo = finish_controls()
         conv_btn = gr.Button("変換する", variant="primary")
         conv_out = gr.Audio(label="結果", type="filepath")
@@ -373,11 +440,15 @@ with gr.Blocks(title="Voice Studio") as demo:
     new_btn.click(create_voice, new_name, [voice, new_name])
     voice.change(raw_summary, voice, raw_info).then(refresh, voice, [status, log]).then(ckpt_choices, voice, ckpt)
     add_btn.click(add_files, [voice, files], [raw_info, files])
-    start_btn.click(start_training, [voice, size, tts_epochs, vc_steps, do_tts, do_vc], status)
+    start_btn.click(start_training, [voice, size, tts_epochs, vc_steps, do_tts, do_vc, use_purity, purity, eval_sim],
+                    status)
+    test_sw.change(set_test_mode, test_sw, [t0, t1, t2, t3])
+    clean_btn.click(cleanup_separated, clean_days, disk_info)
+    rt_btn.click(start_realtime)
     stop_btn.click(stop_training, voice, status)
     gr.Timer(5).tick(refresh, voice, [status, log])
     reload_ckpt.click(ckpt_choices, voice, ckpt)
-    speak_btn.click(do_speak, [voice, text, ckpt, instruct] + speak_fx, [speak_out, speak_file, speak_info, speak_raw])
+    speak_btn.click(do_speak, [voice, text, ckpt, instruct, chain_vc] + speak_fx, [speak_out, speak_file, speak_info, speak_raw])
     speak_redo.click(finish, [speak_raw] + speak_fx, [speak_out, speak_file])
     conv_btn.click(do_convert, [voice, src, steps, auto_pitch, semitone] + conv_fx,
                    [conv_out, conv_file, conv_info, conv_raw])
