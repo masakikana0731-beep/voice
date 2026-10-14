@@ -11,6 +11,7 @@
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 
@@ -20,7 +21,7 @@ import soundfile as sf
 from studio.common import AUDIO_EXT, VOICES, ffmpeg, write_status
 
 HQ_SR, TTS_SR = 44100, 24000
-MIN_SEC, MAX_SEC = 2.0, 15.0
+MIN_SEC, MAX_SEC = 2.0, 10.0  # 長いと書き起こしが崩れやすい
 ASR_MODEL = "openai/whisper-large-v3-turbo"
 
 
@@ -31,6 +32,28 @@ def load(path, sr):
         capture_output=True, check=True,
     ).stdout
     return np.frombuffer(out, dtype=np.float32).copy()
+
+
+def bad_transcript(text: str, sec: float) -> str | None:
+    """書き起こしの失敗（Whisper の幻覚）を見つける。理由を返す（問題なければ None）。
+
+    失敗した書き起こしで学習すると「同じ音を繰り返して話し終わらない」モデルになる。
+    """
+    import zlib
+
+    t = re.sub(r"\s", "", text)
+    if not t:
+        return "空"
+    cps = len(t) / sec
+    if cps > 12:
+        return f"文字が多すぎる（{cps:.0f}文字/秒）"
+    if cps < 1.5:
+        return f"文字が少なすぎる（{cps:.1f}文字/秒）"
+    if len(t) >= 20 and len(t.encode()) / len(zlib.compress(t.encode())) > 2.4:
+        return "同じ言葉の繰り返し"
+    if re.search(r"(.)\1{5,}", t):
+        return "同じ文字の連続"
+    return None
 
 
 def segments(y, sr):
@@ -99,7 +122,7 @@ def main() -> int:
             clips.append((name, (e - s) / HQ_SR))
         print(f"[prep] {raw.name}: 累計 {len(clips)} クリップ", flush=True)
 
-    total = sum(d for _, d in clips)
+    total = sum(d for _, d in clips)  # 区切った全体の長さ
     write_status(vdir, stage="prep", message=f"{len(clips)} クリップ（{total / 60:.1f}分）を書き起こし中")
     asr = pipeline(
         "automatic-speech-recognition", model=fetch_model(ASR_MODEL),
@@ -116,6 +139,16 @@ def main() -> int:
         print(f"[prep] 書き起こし {len(texts)}/{len(paths)}", flush=True)
         write_status(vdir, stage="prep", message=f"書き起こし {len(texts)}/{len(paths)}")
 
+    # 書き起こしに失敗したクリップは学習に使わない
+    dropped = []
+    for i, ((n, d), t) in enumerate(zip(clips, texts)):
+        why = bad_transcript(t, d)
+        if why:
+            dropped.append(f"{n}: {why} | {t[:40]}")
+            texts[i] = ""
+    (vdir / "dropped.txt").write_text("\n".join(dropped), encoding="utf-8")
+    print(f"[prep] 書き起こし失敗で除外: {len(dropped)} クリップ", flush=True)
+
     # 参照音声: 8 秒に一番近い、書き起こしのあるクリップ
     ok = [(n, d) for (n, d), t in zip(clips, texts) if t]
     ref = min(ok, key=lambda c: abs(c[1] - 8.0))[0]
@@ -129,9 +162,10 @@ def main() -> int:
             if t:
                 f.write(json.dumps({"audio": str(vdir / "clips" / n), "text": t,
                                     "ref_audio": str(vdir / "ref.wav")}, ensure_ascii=False) + "\n")
-    write_status(vdir, stage="prep_done", clips=len(ok), minutes=round(total / 60, 1),
-                 message=f"準備完了: {len(ok)} クリップ / {total / 60:.1f}分")
-    print(f"[prep] 完了 {len(ok)} クリップ / {total / 60:.1f}分", flush=True)
+    used = sum(d for _, d in ok)
+    write_status(vdir, stage="prep_done", clips=len(ok), minutes=round(used / 60, 1),
+                 message=f"準備完了: {len(ok)} クリップ / {used / 60:.1f}分（書き起こし失敗 {len(dropped)} 件を除外）")
+    print(f"[prep] 完了 {len(ok)} クリップ / {used / 60:.1f}分", flush=True)
     return 0
 
 

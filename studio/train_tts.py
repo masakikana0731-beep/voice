@@ -1,6 +1,8 @@
 """Qwen3-TTS を 1 人の声でファインチューニングする。
 
 公式 third_party/Qwen3-TTS/finetuning/sft_12hz.py をもとに、Windows + 12GB GPU 向けに変更:
+  - 【不具合修正】テキスト埋め込みに text_projection を通す（公式は通しておらず、推論とずれて壊れる）
+  - 【不具合修正】損失のラベルが二重にずれていたのを直す（公式＋transformers の自動シフトで 2 つ先を学習していた）
   - flash-attn なし（sdpa）、文字コードは UTF-8 固定
   - VRAM 節約: テキスト埋め込みを凍結、8bit AdamW、勾配チェックポイント
   - チェックポイントはベースモデルの重みをコピーせず、最新 N 個だけ残す
@@ -17,6 +19,7 @@ import time
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from studio.common import QWEN_FT, SPEAKER, VOICES, write_status
@@ -88,10 +91,14 @@ def main() -> int:
     ap.add_argument("--lr", type=float, default=2e-5)
     ap.add_argument("--batch-size", type=int, default=2)
     ap.add_argument("--keep", type=int, default=2, help="残すチェックポイント数")
+    ap.add_argument("--optim", choices=["adamw8bit", "adamw"], default="adamw8bit")
+    ap.add_argument("--no-freeze", action="store_true", help="テキスト埋め込みも学習する（公式と同じ）")
+    ap.add_argument("--no-gc", action="store_true", help="勾配チェックポイントを使わない（公式と同じ）")
+    ap.add_argument("--out", default="tts", help="保存先フォルダ名（voices/<名前>/ 以下）")
     args = ap.parse_args()
 
     vdir = VOICES / args.voice
-    out_root = vdir / "tts"
+    out_root = vdir / args.out
     train_jsonl = encode_codes(vdir, "cuda:0")
 
     base = Path(fetch_model(f"Qwen/Qwen3-TTS-12Hz-{args.size}-Base"))
@@ -106,20 +113,23 @@ def main() -> int:
 
     model = qwen.model
     # 大きいテキスト埋め込み（語彙 15 万）と話者エンコーダは学習しない → メモリ節約
-    for name, p in model.named_parameters():
-        if name.startswith("speaker_encoder") or "text_embedding" in name:
-            p.requires_grad_(False)
-    try:
-        model.talker.gradient_checkpointing_enable()
-    except Exception as e:  # 対応していなければそのまま
-        print(f"[tts] gradient checkpointing 無効: {e}", flush=True)
+    if not args.no_freeze:
+        for name, p in model.named_parameters():
+            if name.startswith("speaker_encoder") or "text_embedding" in name:
+                p.requires_grad_(False)
+    if not args.no_gc:
+        try:
+            model.talker.gradient_checkpointing_enable()
+        except Exception as e:  # 対応していなければそのまま
+            print(f"[tts] gradient checkpointing 無効: {e}", flush=True)
     params = [p for p in model.parameters() if p.requires_grad]
-    try:
+    if args.optim == "adamw8bit":
         import bitsandbytes as bnb
 
         optimizer = bnb.optim.AdamW8bit(params, lr=args.lr, weight_decay=0.01)
-    except ImportError:
+    else:
         optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.01)
+    print(f"[tts] size={args.size} optim={args.optim} freeze={not args.no_freeze} gc={not args.no_gc} lr={args.lr}", flush=True)
 
     model, optimizer, loader = accelerator.prepare(model, optimizer, loader)
     model.train()
@@ -141,7 +151,9 @@ def main() -> int:
                 if spk_embedding is None:
                     spk_embedding = speaker_embedding
 
-                emb = model.talker.model.text_embedding(input_ids[:, :, 0]) * text_mask
+                # 公式 sft_12hz.py は text_projection を通していないが、推論（generate）では必ず通す。
+                # 学習と推論で入力がずれてモデルが壊れる（話し終わらない・雑音）ので、ここで通す
+                emb = model.talker.text_projection(model.talker.model.text_embedding(input_ids[:, :, 0])) * text_mask
                 codec_emb = model.talker.model.codec_embedding(input_ids[:, :, 1]) * codec_emb_mask
                 codec_emb[:, 6, :] = speaker_embedding
                 emb = emb + codec_emb
@@ -149,13 +161,22 @@ def main() -> int:
                     e = model.talker.code_predictor.get_input_embeddings()[i - 1](codec_ids[:, :, i])
                     emb = emb + e * codec_mask.unsqueeze(-1)
 
+                # 【不具合修正】公式はラベルを 1 つずらして model に渡すが、transformers の損失関数
+                # （ForCausalLMLoss）も内部でさらに 1 つずらすため「2 つ先」を学習してしまい、モデルが壊れる。
+                # ずらし済みのラベルで、ずらさない交差エントロピーを自分で計算する
                 out = model.talker(
                     inputs_embeds=emb[:, :-1, :], attention_mask=batch["attention_mask"][:, :-1],
-                    labels=batch["codec_0_labels"][:, 1:], output_hidden_states=True,
+                    output_hidden_states=True,
                 )
+                labels = batch["codec_0_labels"][:, 1:]
+                talker_loss = F.cross_entropy(out.logits.float().reshape(-1, out.logits.shape[-1]),
+                                              labels.reshape(-1), ignore_index=-100)
                 hidden = out.hidden_states[0][-1][codec_mask[:, :-1]]
-                _, sub_loss = model.talker.forward_sub_talker_finetune(codec_ids[codec_mask], hidden)
-                loss = out.loss + 0.3 * sub_loss
+                sub_codes = codec_ids[codec_mask]
+                sub_logits, _ = model.talker.forward_sub_talker_finetune(sub_codes, hidden)  # 返る損失はずれているので使わない
+                sub_loss = F.cross_entropy(sub_logits.float().reshape(-1, sub_logits.shape[-1]),
+                                           sub_codes[:, 1:].reshape(-1))
+                loss = talker_loss + 0.3 * sub_loss
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:

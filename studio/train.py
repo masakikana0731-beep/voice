@@ -16,8 +16,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("voice")
     ap.add_argument("--size", default="1.7B")
-    ap.add_argument("--tts-epochs", type=int, default=10)
+    ap.add_argument("--tts-epochs", type=int, default=4)
     ap.add_argument("--vc-steps", type=int, default=3000)
+    ap.add_argument("--vc-batch", type=int, default=1, help="12GB の GPU では 1（2 だとメモリがあふれて極端に遅くなる）")
     ap.add_argument("--skip", action="append", default=[], choices=["prep", "tts", "vc"])
     args = ap.parse_args()
 
@@ -33,9 +34,13 @@ def main() -> int:
         return fail("データ準備")
 
     if "tts" not in args.skip:
-        cmd = [PY, "-m", "studio.train_tts", args.voice, "--size", args.size, "--epochs", args.tts_epochs]
+        cmd = [PY, "-m", "studio.train_tts", args.voice, "--size", args.size, "--epochs", args.tts_epochs,
+               "--keep", args.tts_epochs]
         if run_logged(cmd, log) != 0:
             return fail("文章読み上げの学習")
+        # 学習しすぎで壊れることがあるので、各周を採点して一番よく読めるものを選ぶ
+        if run_logged([PY, "-m", "studio.eval_tts", args.voice], log) != 0:
+            return fail("読み上げモデルの採点")
 
     if "vc" not in args.skip:
         steps = args.vc_steps
@@ -49,7 +54,7 @@ def main() -> int:
 
         write_status(vdir, stage="vc", message="声変換の学習を準備中", progress=0)
         cmd = [VC_PY, ROOT / "studio" / "vc_run.py", "train.py", "--config", VC_CONFIG, "--dataset-dir", vdir / "clips_hq",
-               "--run-name", args.voice, "--batch-size", 2, "--max-steps", steps, "--max-epochs", 100000,
+               "--run-name", args.voice, "--batch-size", args.vc_batch, "--max-steps", steps, "--max-epochs", 100000,
                "--save-every", 500, "--num-workers", 0]
         if run_logged(cmd, log, cwd=SEEDVC, on_line=progress) != 0:
             return fail("声変換の学習")

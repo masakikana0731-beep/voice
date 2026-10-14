@@ -284,7 +284,7 @@ with gr.Blocks(title="Voice Studio") as demo:
         raw_info = gr.Textbox(label="追加済み", lines=2, interactive=False)
         with gr.Accordion("学習の設定", open=False):
             size = gr.Radio(["1.7B", "0.6B"], value="1.7B", label="読み上げモデルの大きさ（メモリ不足なら 0.6B）")
-            tts_epochs = gr.Slider(1, 50, value=10, step=1, label="文章読み上げの学習回数（周）。多いほど長時間・クセを覚える")
+            tts_epochs = gr.Slider(1, 20, value=4, step=1, label="文章読み上げの学習回数（周）。多すぎると壊れるので、各周を自動で採点して一番良いものを使います")
             vc_steps = gr.Slider(500, 20000, value=3000, step=500, label="声変換の学習ステップ数")
             do_tts = gr.Checkbox(True, label="文章読み上げ（②）を学習する")
             do_vc = gr.Checkbox(True, label="声変換（③）を学習する")
@@ -297,7 +297,7 @@ with gr.Blocks(title="Voice Studio") as demo:
     with gr.Tab("② 文章から読み上げ"):
         text = gr.Textbox(label="読ませる文章", lines=4)
         with gr.Row():
-            ckpt = gr.Dropdown(label="モデル（新しい順）", scale=2)
+            ckpt = gr.Dropdown(label="モデル（一番上が採点で一番良かったもの）", scale=2)
             reload_ckpt = gr.Button("一覧を更新", scale=1)
         instruct = gr.Textbox(label="話し方の指示（任意。学習済みモデルでは効かないことがあります）", placeholder="例: 嬉しそうに")
         speak_btn = gr.Button("読み上げる", variant="primary")

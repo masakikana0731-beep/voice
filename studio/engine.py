@@ -15,7 +15,11 @@ _cache = {"key": None, "model": None}
 
 
 def tts_checkpoints(voice: str) -> list[str]:
-    return [p.name for p in sorted((VOICES / voice / "tts").glob("epoch-*"), reverse=True)]
+    """新しい順。採点済みなら一番よく読めるもの（best.txt）を先頭にする。"""
+    tdir = VOICES / voice / "tts"
+    names = [p.name for p in sorted(tdir.glob("epoch-*"), reverse=True)]
+    best = (tdir / "best.txt").read_text(encoding="utf-8").strip() if (tdir / "best.txt").exists() else None
+    return [best] + [n for n in names if n != best] if best in names else names
 
 
 def _load(key, path):
@@ -43,7 +47,13 @@ def unload() -> None:
         torch.cuda.empty_cache()
 
 
-def speak(voice: str, text: str, checkpoint: str | None, instruct: str = "") -> tuple[Path, str]:
+def _max_tokens(text: str) -> int:
+    """生成の上限（12 トークン/秒）。日本語は 1 秒 6〜8 文字なので、その 2〜3 倍の余裕を持たせる。
+    モデルが壊れて話し終わらなくなっても、延々と生成し続けないようにする。"""
+    return max(96, int(len(text) * 3.5) + 48)
+
+
+def speak(voice: str, text: str, checkpoint: str | None, instruct: str = "", sub: str = "tts") -> tuple[Path, str]:
     """学習済みなら学習した声で、未学習なら参照音声からのクローンで読み上げる。"""
     import soundfile as sf
 
@@ -53,9 +63,11 @@ def speak(voice: str, text: str, checkpoint: str | None, instruct: str = "") -> 
     with _lock:
         t0 = time.time()
         if checkpoint:
-            model = _load(("ft", voice, checkpoint), vdir / "tts" / checkpoint)
-            wavs, sr = model.generate_custom_voice(text=text, language="Japanese", speaker=SPEAKER,
-                                                   instruct=instruct or None)
+            model = _load(("ft", voice, sub, checkpoint), vdir / sub / checkpoint)
+            # 公式の学習コードは言語指定なし（Auto）の形式で学習するので、読み上げ時も Auto にそろえる。
+            # "Japanese" を指定すると学習時と違う先頭トークンになり、話し終わらない・雑音になる
+            wavs, sr = model.generate_custom_voice(text=text, language="Auto", speaker=SPEAKER,
+                                                   instruct=instruct or None, max_new_tokens=_max_tokens(text))
             how = f"学習済みモデル {checkpoint}"
         else:
             if not (vdir / "ref.wav").exists():
@@ -63,7 +75,7 @@ def speak(voice: str, text: str, checkpoint: str | None, instruct: str = "") -> 
             model = _load(("base",), fetch_model("Qwen/Qwen3-TTS-12Hz-1.7B-Base"))
             ref_text = (vdir / "ref.txt").read_text(encoding="utf-8")
             wavs, sr = model.generate_voice_clone(text=text, language="Japanese", ref_audio=str(vdir / "ref.wav"),
-                                                  ref_text=ref_text)
+                                                  ref_text=ref_text, max_new_tokens=_max_tokens(text))
             how = "未学習（参照音声からのクローン）"
         out = OUT / voice / f"tts_{time.strftime('%Y%m%d-%H%M%S')}.wav"
         out.parent.mkdir(parents=True, exist_ok=True)
