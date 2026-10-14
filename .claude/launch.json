@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "voice-studio",
+      "runtimeExecutable": "C:\\Users\\masak\\claude\\VOICE\\.venv\\Scripts\\python.exe",
+      "runtimeArgs": ["-m", "studio.app", "--no-browser"],
+      "port": 7860
+    }
+  ]
+}

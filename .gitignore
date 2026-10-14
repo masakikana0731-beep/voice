@@ -8,3 +8,6 @@ dl.log
 models/
 speak.log
 .claude/settings.local.json
+third_party/
+voices/
+.venv-vc/
