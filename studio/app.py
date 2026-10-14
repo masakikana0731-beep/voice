@@ -109,28 +109,69 @@ def ckpt_choices(voice):
 MAX_SPK = 5
 
 
-def do_separate(files, urls, dereverb, denoise, speakers):
+SEP_DIR = ROOT / "outputs" / "separated"
+DETACH = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
+
+
+def _sep_status(job):
+    try:
+        return json.loads((SEP_DIR / job / "status.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        # status.json のない古い結果は、出力があれば完了扱い
+        return {"state": "done", "message": "完了"} if list((SEP_DIR / job).glob("*_voice.wav")) else {}
+
+
+def sep_jobs():
+    """過去の抽出（新しい順）。表示名は「日時  入力（状態）」。"""
+    items = []
+    for d in sorted((p for p in SEP_DIR.glob("*") if p.is_dir()), reverse=True)[:30]:
+        inp = d / "inputs.txt"
+        first = inp.read_text(encoding="utf-8").splitlines()[0] if inp.exists() else ""
+        name = Path(first).name if first and not first.startswith("http") else first.split("//")[-1][:40]
+        state = {"running": "処理中", "error": "失敗", "done": "完了"}.get(_sep_status(d.name).get("state"), "?")
+        when = f"{d.name[4:6]}/{d.name[6:8]} {d.name[9:11]}:{d.name[11:13]}"
+        items.append((f"{when}  {name}（{state}）", d.name))
+    return items
+
+
+def start_separate(files, urls, dereverb, denoise, speakers):
     inputs = list(files or []) + [u.strip() for u in (urls or "").splitlines() if u.strip()]
     if not inputs:
         raise gr.Error("動画・音声ファイルか、YouTube の URL を入れてください")
     engine.unload()
-    out_dir = ROOT / "outputs" / "separated" / time.strftime("%Y%m%d-%H%M%S")
+    job = time.strftime("%Y%m%d-%H%M%S")
+    out_dir = SEP_DIR / job
+    out_dir.mkdir(parents=True, exist_ok=True)
     mode = {"分けない": "off", "自動": "auto"}.get(speakers, speakers.rstrip("人"))
     cmd = [str(SEP_PY), "-m", "studio.separate", *inputs, "-o", str(out_dir), "--speakers", mode]
     if not dereverb:
         cmd.append("--no-dereverb")
     if not denoise:
         cmd.append("--no-denoise")
-    t0 = time.time()
-    p = subprocess.run(cmd, cwd=ROOT, env=child_env(), capture_output=True, text=True, encoding="utf-8", errors="replace")
-    outs = sorted(str(f) for f in out_dir.glob("*_voice.wav"))
-    if p.returncode != 0 or not outs:
-        raise gr.Error("抽出に失敗しました: " + (p.stdout + p.stderr)[-800:])
+    # 画面を閉じても・スマホがスリープしても処理が続くよう、独立したプロセスで動かす
+    with open(out_dir / "sep.log", "w", encoding="utf-8") as log:
+        subprocess.Popen(cmd, cwd=ROOT, env=child_env(), stdout=log, stderr=subprocess.STDOUT, creationflags=DETACH)
+    gr.Info("抽出を始めました。画面を閉じても処理は続きます")
+    return gr.update(choices=sep_jobs(), value=job)
 
+
+def render_job(job):
+    """抽出結果を画面に出す。戻り値: [メッセージ, ファイル一覧, パス, 表示中の job] + 話者枠。"""
+    hidden = [gr.update(value=None, visible=False), gr.update(value=False, visible=False)] * MAX_SPK
+    if not job:
+        return ["", None, [], None] + hidden
+    st = _sep_status(job)
+    if not st:
+        return ["状態が分かりません（古い形式の処理か、途中で止まった可能性があります）", None, [], None] + hidden
+    if st.get("state") != "done":
+        msg = {"running": "⏳ 処理中: ", "error": "⚠ "}.get(st.get("state"), "") + st.get("message", "")
+        return [msg + f"（{st.get('updated', '')}）", None, [], None] + hidden
+    out_dir = SEP_DIR / job
+    outs = sorted(str(f) for f in out_dir.glob("*_voice.wav"))
     spk_json = out_dir / "speakers" / "speakers.json"
     spk = json.loads(spk_json.read_text(encoding="utf-8")) if spk_json.exists() else []
-    # 話者ごとの枠（最大 5）。話者分けしないときは抽出結果をそのまま 1 枠目に出す
-    slots = spk or [{"file": f, "seconds": None} for f in outs]
+    # 話者ごとの枠（最大 5）。話者分けしないときは抽出結果をそのまま並べる
+    slots = (spk or [{"file": f, "seconds": None} for f in outs])[:MAX_SPK]
     updates = []
     for i in range(MAX_SPK):
         if i < len(slots):
@@ -140,8 +181,18 @@ def do_separate(files, urls, dereverb, denoise, speakers):
                         gr.update(value=(i == 0), label=f"{label} を残す", visible=True)]
         else:
             updates += [gr.update(value=None, visible=False), gr.update(value=False, visible=False)]
-    msg = f"抽出完了（{time.time() - t0:.0f}秒）。" + (f"{len(spk)} 人に分けました。残したい人にチェックしてください。" if spk else "")
-    return [msg, outs + [s["file"] for s in spk], [s["file"] for s in slots]] + updates
+    msg = "✅ 抽出完了。" + (f"{len(spk)} 人に分けました。残したい人にチェックしてください。" if spk else "")
+    return [msg, outs + [s["file"] for s in spk], [s["file"] for s in slots], job] + updates
+
+
+def tick_job(job, shown):
+    """5 秒ごと: 処理中は進み具合だけ更新。完了した瞬間に一度だけ結果を出す（チェックを消さないため）。"""
+    if not job or job == shown:
+        return [gr.skip()] * (4 + 2 * MAX_SPK)
+    st = _sep_status(job)
+    if st.get("state") == "done":
+        return render_job(job)
+    return [render_job(job)[0]] + [gr.skip()] * (3 + 2 * MAX_SPK)
 
 
 def add_separated(voice, paths, *checks):
@@ -199,6 +250,7 @@ with gr.Blocks(title="Voice Studio") as demo:
             dereverb = gr.Checkbox(True, label="残響（エコー）も消す")
             denoise = gr.Checkbox(True, label="雑音も消す")
         sep_btn = gr.Button("声を抽出する", variant="primary")
+        sep_job = gr.Dropdown(sep_jobs(), label="抽出結果（新しい順。前の結果もここから開けます）")
         sep_info = gr.Markdown()
         spk_audio, spk_check = [], []
         for i in range(MAX_SPK):
@@ -206,6 +258,7 @@ with gr.Blocks(title="Voice Studio") as demo:
                 spk_audio.append(gr.Audio(type="filepath", visible=False, scale=4))
                 spk_check.append(gr.Checkbox(False, visible=False, scale=1))
         sep_paths = gr.State([])
+        sep_shown = gr.State(None)
         sep_add = gr.Button("チェックした人を「使う声」の学習データに追加", variant="primary")
         sep_out = gr.File(label="抽出したファイル（ダウンロード可）", file_count="multiple")
 
@@ -249,7 +302,10 @@ with gr.Blocks(title="Voice Studio") as demo:
         conv_info = gr.Markdown()
 
     spk_outputs = [x for pair in zip(spk_audio, spk_check) for x in pair]
-    sep_btn.click(do_separate, [sep_files, sep_urls, dereverb, denoise, speakers], [sep_info, sep_out, sep_paths] + spk_outputs)
+    job_outputs = [sep_info, sep_out, sep_paths, sep_shown] + spk_outputs
+    sep_btn.click(start_separate, [sep_files, sep_urls, dereverb, denoise, speakers], sep_job)
+    sep_job.change(render_job, sep_job, job_outputs)
+    gr.Timer(5).tick(tick_job, [sep_job, sep_shown], job_outputs)
     sep_add.click(add_separated, [voice, sep_paths] + spk_check, raw_info)
     new_btn.click(create_voice, new_name, [voice, new_name])
     voice.change(raw_summary, voice, raw_info).then(refresh, voice, [status, log]).then(ckpt_choices, voice, ckpt)
@@ -260,6 +316,7 @@ with gr.Blocks(title="Voice Studio") as demo:
     reload_ckpt.click(ckpt_choices, voice, ckpt)
     speak_btn.click(do_speak, [voice, text, ckpt, instruct], [speak_out, speak_info])
     conv_btn.click(do_convert, [voice, src, steps, auto_pitch, semitone], [conv_out, conv_info])
+    demo.load(lambda: gr.update(choices=sep_jobs(), value=(sep_jobs() or [(None, None)])[0][1]), None, sep_job)
     demo.load(raw_summary, voice, raw_info).then(refresh, voice, [status, log]).then(ckpt_choices, voice, ckpt)
 
 

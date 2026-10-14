@@ -40,8 +40,18 @@ SR = 44100
 MAX_SPEAKERS = 5
 
 
+STATUS = None  # 出力フォルダの status.json（UI が進み具合を読む）
+
+
+def set_status(state, message):
+    if STATUS:
+        STATUS.write_text(json.dumps({"state": state, "message": message, "updated": time.strftime("%H:%M:%S")},
+                                     ensure_ascii=False), encoding="utf-8")
+
+
 def log(msg):
     print(msg, flush=True)
+    set_status("running", msg.replace("[sep] ", "").replace("[done] ", "保存: "))
 
 
 def download(url, tmp):
@@ -176,6 +186,13 @@ def main() -> int:
     ap.add_argument("--speakers", default="auto", help="off / auto / 1〜5")
     args = ap.parse_args()
 
+    global STATUS
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    STATUS = out / "status.json"
+    (out / "inputs.txt").write_text("\n".join(args.inputs), encoding="utf-8")
+    set_status("running", "開始しました")
+
     steps = [s for s in STEPS if not (args.no_dereverb and s[2] == "noreverb") and not (args.no_denoise and s[2] == "dry")]
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -223,4 +240,13 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        code = main()
+        set_status("done", "完了しました")
+    except Exception as e:  # UI に失敗の理由を見せる
+        import traceback
+
+        traceback.print_exc()
+        set_status("error", f"失敗しました: {e}")
+        code = 1
+    raise SystemExit(code)
