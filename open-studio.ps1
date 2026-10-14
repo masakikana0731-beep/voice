@@ -24,7 +24,8 @@ if ($serve -notmatch "localhost:7860") {
 }
 
 # 3. Voice Studio が起動しているか（していなければ起動）
-$listening = Get-NetTCPConnection -LocalPort 7860 -State Listen -ErrorAction SilentlyContinue
+# Get-NetTCPConnection は環境によって空を返すことがあるので netstat で判定する
+$listening = netstat -ano | Select-String ":7860\s.*LISTENING"
 $started = $false
 if (-not $listening) {
     Start-Process -FilePath "$root\start-studio.bat" -WorkingDirectory $root -WindowStyle Minimized
