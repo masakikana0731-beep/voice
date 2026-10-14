@@ -107,6 +107,7 @@ def ckpt_choices(voice):
 
 
 MAX_SPK = 5
+SAME_PERSON = 0.6  # 登録済みの声との近さがこれ以上なら同じ人とみなす
 
 
 SEP_DIR = ROOT / "outputs" / "separated"
@@ -134,7 +135,7 @@ def sep_jobs():
     return items
 
 
-def start_separate(files, urls, dereverb, denoise, speakers):
+def start_separate(voice, files, urls, dereverb, denoise, speakers):
     inputs = list(files or []) + [u.strip() for u in (urls or "").splitlines() if u.strip()]
     if not inputs:
         raise gr.Error("動画・音声ファイルか、YouTube の URL を入れてください")
@@ -148,6 +149,12 @@ def start_separate(files, urls, dereverb, denoise, speakers):
         cmd.append("--no-dereverb")
     if not denoise:
         cmd.append("--no-denoise")
+    # 「使う声」に登録済みの録音があれば、それに近い人を自動で選べるよう比べる
+    if voice and mode != "off":
+        refs = sorted((voice_dir(voice) / "raw").glob("*"), key=lambda f: f.stat().st_mtime)[-3:]
+        refs = [str(f) for f in refs if f.suffix.lower() in AUDIO_EXT]
+        if refs:
+            cmd += ["--match", *refs]
     # 画面を閉じても・スマホがスリープしても処理が続くよう、独立したプロセスで動かす
     with open(out_dir / "sep.log", "w", encoding="utf-8") as log:
         subprocess.Popen(cmd, cwd=ROOT, env=child_env(), stdout=log, stderr=subprocess.STDOUT, creationflags=DETACH)
@@ -175,13 +182,19 @@ def render_job(job):
     updates = []
     for i in range(MAX_SPK):
         if i < len(slots):
-            sec = slots[i]["seconds"]
+            sec, sim = slots[i]["seconds"], slots[i].get("similarity")
             label = f"話者{i + 1}（{sec:.0f}秒）" if sec is not None else Path(slots[i]["file"]).name
+            if sim is not None:
+                label += f" 登録済みの声との近さ {sim:.2f}" + (" ★" if sim >= SAME_PERSON else "")
+            # 登録済みの声と比べたなら、近い人（同一人物とみなせる人）にだけチェック。比べていなければ 1 人目
+            checked = sim >= SAME_PERSON if sim is not None else i == 0
             updates += [gr.update(value=slots[i]["file"], label=label, visible=True),
-                        gr.update(value=(i == 0), label=f"{label} を残す", visible=True)]
+                        gr.update(value=checked, label=f"{label} を残す", visible=True)]
         else:
             updates += [gr.update(value=None, visible=False), gr.update(value=False, visible=False)]
     msg = "✅ 抽出完了。" + (f"{len(spk)} 人に分けました。残したい人にチェックしてください。" if spk else "")
+    if any(s.get("similarity", 0) >= SAME_PERSON for s in spk):
+        msg += "（★ = 登録済みの声と同じ人とみられるので、自動でチェックしました）"
     return [msg, outs + [s["file"] for s in spk], [s["file"] for s in slots], job] + updates
 
 
@@ -239,7 +252,8 @@ with gr.Blocks(title="Voice Studio") as demo:
 
     with gr.Tab("⓪ 動画から声を抽出"):
         gr.Markdown("動画・音声ファイル、または **YouTube の URL** から、BGM・効果音・残響・雑音を消して声だけを取り出し、"
-                    "**話している人ごとに分けます**。聞き比べて、残したい人だけを学習データに追加できます。")
+                    "**話している人ごとに分けます**。聞き比べて、残したい人だけを学習データに追加できます。"
+                    "上の「使う声」に録音を登録済みなら、**同じ人に自動でチェック**が付きます。")
         with gr.Row():
             sep_files = gr.File(file_count="multiple", file_types=list(VIDEO_EXT + AUDIO_EXT), label="動画・音声ファイル")
             sep_urls = gr.Textbox(label="YouTube などの URL（1行に1つ。複数可）", lines=4,
@@ -303,7 +317,7 @@ with gr.Blocks(title="Voice Studio") as demo:
 
     spk_outputs = [x for pair in zip(spk_audio, spk_check) for x in pair]
     job_outputs = [sep_info, sep_out, sep_paths, sep_shown] + spk_outputs
-    sep_btn.click(start_separate, [sep_files, sep_urls, dereverb, denoise, speakers], sep_job)
+    sep_btn.click(start_separate, [voice, sep_files, sep_urls, dereverb, denoise, speakers], sep_job)
     sep_job.change(render_job, sep_job, job_outputs)
     gr.Timer(5).tick(tick_job, [sep_job, sep_shown], job_outputs)
     sep_add.click(add_separated, [voice, sep_paths] + spk_check, raw_info)

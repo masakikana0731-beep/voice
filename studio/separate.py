@@ -81,7 +81,49 @@ def pick(files, stem):
     raise RuntimeError(f"出力 {stem} が見つかりません: {files}")
 
 
-def diarize(wavs, out_dir, n_speakers):
+_ENC = None
+
+
+def embed(segments):
+    """16kHz の音声片のリスト → 正規化した話者埋め込み（ECAPA）。"""
+    import numpy as np
+    import torch
+    from speechbrain.inference.speaker import EncoderClassifier
+    from speechbrain.utils.fetching import LocalStrategy
+
+    global _ENC
+    if _ENC is None:
+        _ENC = EncoderClassifier.from_hparams(
+            "speechbrain/spkrec-ecapa-voxceleb", savedir=str(MODELS_DIR / "ecapa"),
+            run_opts={"device": "cuda:0" if torch.cuda.is_available() else "cpu"}, local_strategy=LocalStrategy.COPY)
+    embs = []
+    for k in range(0, len(segments), 64):
+        chunk = [torch.from_numpy(np.ascontiguousarray(x)) for x in segments[k:k + 64]]
+        lens = torch.tensor([len(c) for c in chunk], dtype=torch.float32)
+        batch = torch.nn.utils.rnn.pad_sequence(chunk, batch_first=True)
+        with torch.no_grad():
+            embs.append(_ENC.encode_batch(batch, lens / lens.max()).squeeze(1).cpu().numpy())
+    X = np.concatenate(embs)
+    return X / np.linalg.norm(X, axis=1, keepdims=True)
+
+
+def voice_print(paths, max_sec=180):
+    """登録済みの声（複数ファイル可）の平均的な特徴。各ファイルの先頭 max_sec 秒を 3 秒ずつに切って使う。"""
+    import librosa
+    import numpy as np
+
+    segs = []
+    for p in paths:
+        y, _ = librosa.load(str(p), sr=16000, mono=True, duration=max_sec)
+        for s, e in librosa.effects.split(y, top_db=35):
+            segs += [y[i:i + 48000] for i in range(s, e - 24000, 48000)]
+    if not segs:
+        return None
+    c = embed(segs).mean(axis=0)
+    return c / np.linalg.norm(c)
+
+
+def diarize(wavs, out_dir, n_speakers, match=None):
     """声を話者ごとに分けて speaker_N.wav に書き出す。n_speakers=None なら人数を自動推定（最大 5）。"""
     import librosa
     import numpy as np
@@ -114,18 +156,7 @@ def diarize(wavs, out_dir, n_speakers):
     if not spans:
         raise RuntimeError("声が見つかりませんでした")
 
-    enc = EncoderClassifier.from_hparams(
-        "speechbrain/spkrec-ecapa-voxceleb", savedir=str(MODELS_DIR / "ecapa"),
-        run_opts={"device": "cuda:0" if torch.cuda.is_available() else "cpu"}, local_strategy=LocalStrategy.COPY)
-    embs = []
-    for k in range(0, len(spans), 64):
-        chunk = [torch.from_numpy(sp[4][sp[2]:sp[3]]) for sp in spans[k:k + 64]]
-        lens = torch.tensor([len(c) for c in chunk], dtype=torch.float32)
-        batch = torch.nn.utils.rnn.pad_sequence(chunk, batch_first=True)
-        with torch.no_grad():
-            embs.append(enc.encode_batch(batch, lens / lens.max()).squeeze(1).cpu().numpy())
-    X = np.concatenate(embs)
-    X /= np.linalg.norm(X, axis=1, keepdims=True)
+    X = embed([sp[4][sp[2]:sp[3]] for sp in spans])
 
     if len(X) == 1:
         labels = np.zeros(1, dtype=int)
@@ -167,8 +198,12 @@ def diarize(wavs, out_dir, n_speakers):
         audio = np.concatenate([x for p in pieces[c] for x in (p, gap)])
         path = out_dir / f"speaker_{k}.wav"
         sf.write(path, audio, SR, subtype="PCM_16")
-        result.append({"file": str(path), "seconds": round(len(audio) / SR, 1)})
-        log(f"[sep] 話者{k}: {len(audio) / SR:.0f}秒")
+        item = {"file": str(path), "seconds": round(len(audio) / SR, 1)}
+        if match is not None:  # 登録済みの声との近さ（同じ人 ≈0.6 以上、別人 ≈0.3 以下が目安）
+            cen = X[labels == c].mean(axis=0)
+            item["similarity"] = round(float(cen @ match / np.linalg.norm(cen)), 3)
+        result.append(item)
+        log(f"[sep] 話者{k}: {len(audio) / SR:.0f}秒" + (f"（登録済みの声との近さ {item['similarity']:.2f}）" if match is not None else ""))
     (out_dir / "speakers.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result
 
@@ -184,6 +219,7 @@ def main() -> int:
     ap.add_argument("--no-dereverb", action="store_true")
     ap.add_argument("--no-denoise", action="store_true")
     ap.add_argument("--speakers", default="auto", help="off / auto / 1〜5")
+    ap.add_argument("--match", nargs="*", default=[], help="登録済みの声のファイル。各話者がこの声にどれだけ近いかを出す")
     args = ap.parse_args()
 
     global STATUS
@@ -234,7 +270,8 @@ def main() -> int:
     # 5. 話者分け
     if args.speakers != "off":
         t0 = time.time()
-        diarize(outs, out_dir / "speakers", None if args.speakers == "auto" else int(args.speakers))
+        match = voice_print(args.match) if args.match else None
+        diarize(outs, out_dir / "speakers", None if args.speakers == "auto" else int(args.speakers), match)
         log(f"[sep] 話者分け完了（{time.time() - t0:.0f}秒）")
     return 0
 
