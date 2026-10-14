@@ -108,7 +108,8 @@ def convert(voice: str, source: str, steps: int = 30, auto_pitch: bool = True, s
         cmd[cmd.index(source)] = str(src_wav)
         p = subprocess.run(cmd + ["--output", tmp], cwd=SEEDVC, env=child_env(),
                            capture_output=True, text=True, encoding="utf-8", errors="replace")
-        wavs = list(Path(tmp).glob("*.wav"))
+        # tmp には入力の source.wav も置いてあるので、Seed-VC の出力（vc_*.wav）だけを拾う
+        wavs = list(Path(tmp).glob("vc_*.wav"))
         if p.returncode != 0 or not wavs:
             raise RuntimeError("声変換に失敗しました:\n" + (p.stdout + p.stderr)[-1500:])
         out = OUT / voice / f"vc_{time.strftime('%Y%m%d-%H%M%S')}.wav"
