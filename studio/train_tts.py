@@ -87,8 +87,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("voice")
     ap.add_argument("--size", choices=["0.6B", "1.7B"], default="1.7B")
-    ap.add_argument("--epochs", type=int, default=10)
-    ap.add_argument("--lr", type=float, default=2e-5)
+    ap.add_argument("--epochs", type=int, default=3)
+    ap.add_argument("--lr", type=float, default=2e-6)  # 2e-5 だと数十ステップで壊れる（実測）
     ap.add_argument("--batch-size", type=int, default=2)
     ap.add_argument("--keep", type=int, default=2, help="残すチェックポイント数")
     ap.add_argument("--optim", choices=["adamw8bit", "adamw"], default="adamw8bit")

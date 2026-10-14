@@ -16,7 +16,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("voice")
     ap.add_argument("--size", default="1.7B")
-    ap.add_argument("--tts-epochs", type=int, default=4)
+    ap.add_argument("--tts-epochs", type=int, default=3)
     ap.add_argument("--vc-steps", type=int, default=3000)
     ap.add_argument("--vc-batch", type=int, default=1, help="12GB の GPU では 1（2 だとメモリがあふれて極端に遅くなる）")
     ap.add_argument("--skip", action="append", default=[], choices=["prep", "tts", "vc"])
