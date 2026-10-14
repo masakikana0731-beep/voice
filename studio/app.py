@@ -110,6 +110,7 @@ MAX_SPK = 5
 SAME_PERSON = 0.6  # 登録済みの声との近さがこれ以上なら同じ人とみなす
 
 
+OUTPUTS = (ROOT / "outputs").resolve()
 SEP_DIR = ROOT / "outputs" / "separated"
 DETACH = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
 
@@ -222,10 +223,20 @@ def add_separated(voice, paths, *checks):
 
 
 def to_mp3(wav) -> str:
-    """スマホで保存・共有しやすいよう mp3 も作る（ダウンロード欄に出す）。"""
+    """mp3 を作り、保存用ボタンの HTML を返す。
+
+    普通のリンクだとスマホは再生アプリ（YouTube Music など）で開いてしまうので、
+    「保存してください」という指定（Content-Disposition: attachment）付きで配る /dl を使う。
+    """
+    from urllib.parse import quote
+
     mp3 = Path(wav).with_suffix(".mp3")
     subprocess.run([ffmpeg(), "-v", "error", "-y", "-i", str(wav), "-b:a", "160k", str(mp3)], check=True)
-    return str(mp3)
+    rel = mp3.resolve().relative_to(OUTPUTS).as_posix()
+    return (f'<a href="dl?f={quote(rel)}" download="{mp3.name}" '
+            'style="display:block;text-align:center;padding:14px;border-radius:10px;'
+            'background:#e8590c;color:#fff;font-weight:bold;text-decoration:none;font-size:17px">'
+            f'⬇ スマホに保存する（{mp3.name}）</a>')
 
 
 def do_speak(voice, text, ckpt, instruct):
@@ -312,7 +323,7 @@ with gr.Blocks(title="Voice Studio") as demo:
         instruct = gr.Textbox(label="話し方の指示（任意。学習済みモデルでは効かないことがあります）", placeholder="例: 嬉しそうに")
         speak_btn = gr.Button("読み上げる", variant="primary")
         speak_out = gr.Audio(label="結果", type="filepath")
-        speak_file = gr.File(label="ダウンロード（mp3。スマホはここを押して保存）")
+        speak_file = gr.HTML()
         speak_info = gr.Markdown()
 
     with gr.Tab("③声変換"):
@@ -324,7 +335,7 @@ with gr.Blocks(title="Voice Studio") as demo:
             steps = gr.Slider(10, 100, value=30, step=5, label="品質（多いほど高品質・遅い）")
         conv_btn = gr.Button("変換する", variant="primary")
         conv_out = gr.Audio(label="結果", type="filepath")
-        conv_file = gr.File(label="ダウンロード（mp3。スマホはここを押して保存）")
+        conv_file = gr.HTML()
         conv_info = gr.Markdown()
 
     spk_outputs = [x for pair in zip(spk_audio, spk_check) for x in pair]
@@ -360,4 +371,17 @@ if __name__ == "__main__":
         import webbrowser
 
         threading.Timer(4, webbrowser.open, [url]).start()
-    demo.queue().launch(server_name="127.0.0.1", **opts)
+    demo.queue().launch(server_name="127.0.0.1", prevent_thread_lock=True, **opts)
+
+    from fastapi import HTTPException
+    from fastapi.responses import FileResponse
+
+    def download(f: str):
+        """outputs/ の中のファイルを「保存」として配る（外のファイルは出さない）。"""
+        path = (OUTPUTS / f).resolve()
+        if not path.is_file() or OUTPUTS not in path.parents:
+            raise HTTPException(404)
+        return FileResponse(path, media_type="application/octet-stream", filename=path.name)
+
+    demo.app.add_api_route("/dl", download, methods=["GET"])
+    demo.block_thread()
