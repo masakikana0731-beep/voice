@@ -20,7 +20,7 @@ from pathlib import Path
 import gradio as gr
 
 from studio import engine
-from studio.common import AUDIO_EXT, PY, ROOT, SEP_PY, VIDEO_EXT, child_env, list_voices, read_status, safe_name, voice_dir, write_status
+from studio.common import ffmpeg, AUDIO_EXT, PY, ROOT, SEP_PY, VIDEO_EXT, child_env, list_voices, read_status, safe_name, voice_dir, write_status
 
 
 def _alive(pid) -> bool:
@@ -221,6 +221,13 @@ def add_separated(voice, paths, *checks):
     return raw_summary(voice)
 
 
+def to_mp3(wav) -> str:
+    """スマホで保存・共有しやすいよう mp3 も作る（ダウンロード欄に出す）。"""
+    mp3 = Path(wav).with_suffix(".mp3")
+    subprocess.run([ffmpeg(), "-v", "error", "-y", "-i", str(wav), "-b:a", "160k", str(mp3)], check=True)
+    return str(mp3)
+
+
 def do_speak(voice, text, ckpt, instruct):
     if not voice or not text.strip():
         raise gr.Error("声と文章を入れてください")
@@ -230,7 +237,7 @@ def do_speak(voice, text, ckpt, instruct):
         out, info = engine.speak(voice, text, None if ckpt.startswith("（") else ckpt, instruct)
     except Exception as e:
         raise gr.Error(str(e))
-    return str(out), info
+    return str(out), to_mp3(out), info
 
 
 def do_convert(voice, audio, steps, auto_pitch, semitone):
@@ -240,8 +247,10 @@ def do_convert(voice, audio, steps, auto_pitch, semitone):
         out, info = engine.convert(voice, audio, int(steps), auto_pitch, int(semitone))
     except Exception as e:
         raise gr.Error(str(e))
-    return str(out), info
+    return str(out), to_mp3(out), info
 
+
+CSS = ".tab-wrapper button { padding: 0 8px !important; }"
 
 with gr.Blocks(title="Voice Studio") as demo:
     gr.Markdown("# Voice Studio\nなりたい声を学習して、**文章から**、または**自分の声の抑揚で**しゃべらせます。")
@@ -250,8 +259,8 @@ with gr.Blocks(title="Voice Studio") as demo:
         new_name = gr.Textbox(label="新しい声の名前", placeholder="例: narrator", scale=2)
         new_btn = gr.Button("作成", scale=1)
 
-    with gr.Tab("⓪ 動画から声を抽出"):
-        gr.Markdown("動画・音声ファイル、または **YouTube の URL** から、BGM・効果音・残響・雑音を消して声だけを取り出し、"
+    with gr.Tab("⓪抽出"):
+        gr.Markdown("### ⓪ 動画から声を抽出\n動画・音声ファイル、または **YouTube の URL** から、BGM・効果音・残響・雑音を消して声だけを取り出し、"
                     "**話している人ごとに分けます**。聞き比べて、残したい人だけを学習データに追加できます。"
                     "上の「使う声」に録音を登録済みなら、**同じ人に自動でチェック**が付きます。")
         with gr.Row():
@@ -276,8 +285,8 @@ with gr.Blocks(title="Voice Studio") as demo:
         sep_add = gr.Button("チェックした人を「使う声」の学習データに追加", variant="primary")
         sep_out = gr.File(label="抽出したファイル（ダウンロード可）", file_count="multiple")
 
-    with gr.Tab("① 声を学習"):
-        gr.Markdown("なりたい声の録音を入れてください。**合計30分〜1時間**あると良いです（最低10分）。"
+    with gr.Tab("①学習"):
+        gr.Markdown("### ① 声を学習\nなりたい声の録音を入れてください。**合計30分〜1時間**あると良いです（最低10分）。"
                     "雑音・BGMなし、1人だけの声。長い録音のままでOK（自動で区切って書き起こします）。")
         files = gr.File(file_count="multiple", file_types=list(AUDIO_EXT), label="録音ファイル（wav / mp3 / m4a など）")
         add_btn = gr.Button("録音を追加")
@@ -294,7 +303,8 @@ with gr.Blocks(title="Voice Studio") as demo:
         status = gr.Textbox(label="状態", lines=4, interactive=False)
         log = gr.Textbox(label="ログ（最後の15行）", lines=8, interactive=False)
 
-    with gr.Tab("② 文章から読み上げ"):
+    with gr.Tab("②読み上げ"):
+        gr.Markdown("### ② 文章から読み上げ")
         text = gr.Textbox(label="読ませる文章", lines=4)
         with gr.Row():
             ckpt = gr.Dropdown(label="モデル（一番上が採点で一番良かったもの）", scale=2)
@@ -302,10 +312,11 @@ with gr.Blocks(title="Voice Studio") as demo:
         instruct = gr.Textbox(label="話し方の指示（任意。学習済みモデルでは効かないことがあります）", placeholder="例: 嬉しそうに")
         speak_btn = gr.Button("読み上げる", variant="primary")
         speak_out = gr.Audio(label="結果", type="filepath")
+        speak_file = gr.File(label="ダウンロード（mp3。スマホはここを押して保存）")
         speak_info = gr.Markdown()
 
-    with gr.Tab("③ 自分の声で抑揚指定"):
-        gr.Markdown("自分で、つけたい抑揚・間・感情のとおりに読んで録音してください。声だけが学習した声に変わります。")
+    with gr.Tab("③声変換"):
+        gr.Markdown("### ③ 自分の声で抑揚指定\n自分で、つけたい抑揚・間・感情のとおりに読んで録音してください。声だけが学習した声に変わります。")
         src = gr.Audio(sources=["microphone", "upload"], type="filepath", label="自分の録音")
         with gr.Row():
             auto_pitch = gr.Checkbox(True, label="声の高さを学習した声に合わせる（男女差があるときはオン）")
@@ -313,6 +324,7 @@ with gr.Blocks(title="Voice Studio") as demo:
             steps = gr.Slider(10, 100, value=30, step=5, label="品質（多いほど高品質・遅い）")
         conv_btn = gr.Button("変換する", variant="primary")
         conv_out = gr.Audio(label="結果", type="filepath")
+        conv_file = gr.File(label="ダウンロード（mp3。スマホはここを押して保存）")
         conv_info = gr.Markdown()
 
     spk_outputs = [x for pair in zip(spk_audio, spk_check) for x in pair]
@@ -328,28 +340,24 @@ with gr.Blocks(title="Voice Studio") as demo:
     stop_btn.click(stop_training, voice, status)
     gr.Timer(5).tick(refresh, voice, [status, log])
     reload_ckpt.click(ckpt_choices, voice, ckpt)
-    speak_btn.click(do_speak, [voice, text, ckpt, instruct], [speak_out, speak_info])
-    conv_btn.click(do_convert, [voice, src, steps, auto_pitch, semitone], [conv_out, conv_info])
+    speak_btn.click(do_speak, [voice, text, ckpt, instruct], [speak_out, speak_file, speak_info])
+    conv_btn.click(do_convert, [voice, src, steps, auto_pitch, semitone], [conv_out, conv_file, conv_info])
     demo.load(lambda: gr.update(choices=sep_jobs(), value=(sep_jobs() or [(None, None)])[0][1]), None, sep_job)
     demo.load(raw_summary, voice, raw_info).then(refresh, voice, [status, log]).then(ckpt_choices, voice, ckpt)
 
 
 if __name__ == "__main__":
-    opts = dict(allowed_paths=[str(ROOT / "outputs")])
-    if "--local" in sys.argv:  # この PC だけで使う
-        demo.queue().launch(inbrowser="--no-browser" not in sys.argv, **opts)
-    else:  # スマホなど同じ Wi-Fi の端末からも開ける（パスワード + HTTPS）
+    opts = dict(allowed_paths=[str(ROOT / "outputs")], css=CSS)
+    # この PC の中（127.0.0.1）だけで待ち受ける。スマホからは Tailscale の中継（tailscale serve）経由で開く。
+    # Tailscale に入れるのは自分のアカウントの端末だけなので、パスワードは付けない
+    url = "http://127.0.0.1:7860"
+    if "--local" not in sys.argv:
         from studio import remote
 
-        ip, pw = remote.lan_ip(), remote.password()
-        crt, key = remote.cert(ip)
-        ts = remote.show(f"https://{ip}:7860", pw)
-        if "--no-browser" not in sys.argv:
-            import threading
-            import webbrowser
+        url = remote.show() or url
+    if "--no-browser" not in sys.argv:
+        import threading
+        import webbrowser
 
-            # Tailscale の URL は正式な証明書なので警告が出ない。なければ localhost（警告は出るが安全）
-            threading.Timer(4, webbrowser.open, [ts or "https://localhost:7860"]).start()
-        demo.queue().launch(server_name="0.0.0.0", server_port=7860, auth=(remote.USER, pw),
-                            auth_message="Voice Studio にログイン", ssl_certfile=crt, ssl_keyfile=key,
-                            ssl_verify=False, **opts)
+        threading.Timer(4, webbrowser.open, [url]).start()
+    demo.queue().launch(server_name="127.0.0.1", **opts)

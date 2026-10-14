@@ -84,7 +84,7 @@ def tailscale_url() -> str | None:
         if st.get("BackendState") != "Running":
             return None
         # 中継が未設定なら設定する（--bg で PC 再起動後も残る）
-        subprocess.run([TAILSCALE, "serve", "--bg", "--yes", "https+insecure://localhost:7860"],
+        subprocess.run([TAILSCALE, "serve", "--bg", "--yes", "http://localhost:7860"],
                        capture_output=True, text=True, timeout=15)
         return "https://" + st["Self"]["DNSName"].rstrip(".")
     except Exception:
@@ -99,25 +99,16 @@ def show_qr(url: str) -> None:
     qr.print_ascii(invert=True)
 
 
-def show(url: str, pw: str) -> str | None:
-    """起動画面に、スマホで読み取れる QR コードとログイン情報を表示する。Tailscale の URL を返す。"""
+def show() -> str | None:
+    """起動画面に、スマホ用の URL と QR コードを表示する。Tailscale の URL を返す。"""
     ts = tailscale_url()
+    print("\n" + "=" * 60)
     if ts:
-        print("\n" + "=" * 60)
-        print(" 外出先から開く（スマホに Tailscale アプリを入れ、同じアカウントでログイン）")
-        print(f"   URL        : {ts}")
-        print(f"   ユーザー名 : {USER}")
-        print(f"   パスワード : {pw}")
+        print(" スマホから開く（スマホの Tailscale アプリをオンにして、この URL か QR コードから）")
+        print(f"   {ts}")
         print("=" * 60)
         show_qr(ts)
-
-    print("\n" + "=" * 60)
-    print(" スマホから開く: 同じ Wi-Fi につないで、下の QR コードを読み取る")
-    print(f"   URL        : {url}")
-    print(f"   ユーザー名 : {USER}")
-    print(f"   パスワード : {pw}")
-    print(" ※初回は「この接続ではプライバシーが保護されません」と出ます。")
-    print("   「詳細設定」→「アクセスする」で進んでください（自分の PC なので安全です）。")
-    print("=" * 60)
-    show_qr(url)
+    else:
+        print(" Tailscale につながっていないので、この PC からだけ開けます: http://127.0.0.1:7860")
+        print("=" * 60)
     return ts

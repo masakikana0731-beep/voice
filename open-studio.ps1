@@ -19,8 +19,8 @@ if ($state -ne "Running") {
 
 # 2. 中継（tailscale serve）が設定されているか
 $serve = (& $ts serve status 2>&1) -join "`n"
-if ($serve -notmatch "localhost:7860") {
-    & $ts serve --bg --yes https+insecure://localhost:7860 | Out-Null
+if ($serve -notmatch "http://localhost:7860") {
+    & $ts serve --bg --yes http://localhost:7860 | Out-Null
 }
 
 # 3. Voice Studio が起動しているか（していなければ起動）
@@ -39,11 +39,8 @@ for ($i = 0; $i -lt 40; $i++) {
     Start-Sleep 3
 }
 
-$pw = (Get-Content "$root\.studio\password.txt" -ErrorAction SilentlyContinue | Select-Object -First 1)
 Write-Output "tailscale=$state"
 Write-Output "started_now=$started"
 Write-Output "reachable=$ok"
 Write-Output "url=$url"
-Write-Output "user=voice"
-Write-Output "password=$pw"
 Write-Output "qr=$root\outputs\voice_studio_qr.png"
