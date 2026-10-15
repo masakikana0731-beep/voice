@@ -2,6 +2,9 @@
 # 使い方: powershell -ExecutionPolicy Bypass -File setup\setup-studio.ps1
 $ErrorActionPreference = "Continue"
 Set-Location (Split-Path $PSScriptRoot -Parent)
+# Python はプロジェクト内（.python）に入れる。Claude アプリ（ストア版）の中から入れると
+# AppData がアプリ専用の場所に振り替えられ、外（デスクトップのアイコン）から起動できなくなるため
+$env:UV_PYTHON_INSTALL_DIR = "$PWD\.python"
 $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
 function Invoke-Checked { & $args[0] $args[1..($args.Count - 1)]; if ($LASTEXITCODE) { throw "失敗: $args" } }
 
@@ -20,7 +23,7 @@ if (-not (Test-Path third_party\seed-vc)) { Invoke-Checked git clone --depth 1 h
 
 # Seed-VC は依存が古いので別環境（.venv-vc）。torch は本体と同じ 2.11 を使う（2.4 はこの PC で DLL エラー）
 uv python install 3.10
-$py = Get-ChildItem "$env:APPDATA\uv\python\cpython-3.10.*-windows-x86_64-none\python.exe" |
+$py = Get-ChildItem "$PWD\.python\cpython-3.10.*-windows-x86_64-none\python.exe" |
     Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
 Invoke-Checked uv venv --allow-existing --python $py .venv-vc
 Invoke-Checked uv pip install --python .\.venv-vc\Scripts\python.exe torch==2.11.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu128
@@ -31,7 +34,7 @@ Get-Content third_party\seed-vc\requirements.txt |
 Invoke-Checked uv pip install --python .\.venv-vc\Scripts\python.exe -r third_party\seed-vc-req.txt hf_xet
 
 # 声の抽出（⓪ タブ）: audio-separator（UVR のモデル）+ 話者分け + YouTube ダウンロード。別環境 .venv-sep
-$py12 = Get-ChildItem "$env:APPDATA\uv\python\cpython-3.12.*-windows-x86_64-none\python.exe" |
+$py12 = Get-ChildItem "$PWD\.python\cpython-3.12.*-windows-x86_64-none\python.exe" |
     Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
 Invoke-Checked uv venv --allow-existing --python $py12 .venv-sep
 Invoke-Checked uv pip install --python .\.venv-sep\Scripts\python.exe torch==2.11.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu128

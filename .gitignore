@@ -13,3 +13,4 @@ voices/
 .venv-vc/
 .venv-sep/
 .studio/
+.python/

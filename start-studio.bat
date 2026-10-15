@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 rem Voice Studio をダブルクリックで起動（ブラウザが開きます）
 cd /d "%~dp0"
 set PYTHONUTF8=1

@@ -2,6 +2,9 @@
 # 使い方: PowerShell で  powershell -ExecutionPolicy Bypass -File setup\setup.ps1
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path $PSScriptRoot -Parent)
+# Python はプロジェクト内（.python）に入れる。Claude アプリ（ストア版）の中から入れると
+# AppData がアプリ専用の場所に振り替えられ、外（デスクトップのアイコン）から起動できなくなるため
+$env:UV_PYTHON_INSTALL_DIR = "$PWD\.python"
 
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
     Write-Host "[setup] uv をインストールします"
@@ -15,7 +18,7 @@ function Invoke-Checked { & $args[0] $args[1..($args.Count - 1)]; if ($LASTEXITC
 
 # uv の 3.12 ショートカット(ジャンクション)作成が失敗する環境があるため、実体のパスを直接使う
 uv python install 3.12
-$py = Get-ChildItem "$env:APPDATA\uv\python\cpython-3.12.*-windows-x86_64-none\python.exe" -ErrorAction SilentlyContinue |
+$py = Get-ChildItem "$PWD\.python\cpython-3.12.*-windows-x86_64-none\python.exe" -ErrorAction SilentlyContinue |
     Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
 if (-not $py) { throw "Python 3.12 が見つかりません" }
 
