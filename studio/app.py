@@ -273,8 +273,54 @@ def tick_job(job, shown):
 
 # ---------------------------------------------------------------- STEP3: 話者として保存
 
-def save_material(target, name, icon_file, paths, uploads, *checks):
-    """チェックした声（と、そのまま使う録音）を話者の素材に入れる。新しい話者ならここで作る。"""
+def _size(files) -> str:
+    b = sum(Path(f).stat().st_size for f in files if Path(f).exists())
+    return f"{b / 1e6:.0f}MB" if b < 1e9 else f"{b / 1e9:.1f}GB"
+
+
+def cleanup_offer(job, paths, checks):
+    """保存したあと、使わなかった声のデータを消すかを聞く欄の中身。消すものがなければ隠す。"""
+    if not job or not (SEP_DIR / job).exists():
+        return gr.update(visible=False), "", None
+    unused = [f for f, c in zip(paths or [], checks) if not c and Path(f).exists()]
+    mixed = [str(f) for f in (SEP_DIR / job).glob("*_voice.wav")]
+    everything = [str(f) for f in (SEP_DIR / job).rglob("*") if f.is_file()]
+    if not unused and not mixed:
+        return gr.update(visible=False), "", None
+    names = "、".join(f"声{paths.index(f) + 1}" for f in unused) or "なし"
+    md = (f"### 🗑 使わなかったデータを消しますか？\n"
+          f"選んだ声は話者の素材にコピー済みなので、消してもなくなりません。\n\n"
+          f"- **使わなかった声だけ削除**: {names} ＋ 全員分がまざった音声（{_size(unused + mixed)} 空きます）\n"
+          f"- **取り出した結果をまるごと削除**: この動画から取り出したデータ全部（{_size(everything)} 空きます）\n"
+          f"- **残す**: あとで別の人の声も使いたいとき")
+    return gr.update(visible=True), md, {"job": job, "unused": unused, "mixed": mixed}
+
+
+def cleanup_unused(state):
+    """使わなかった声と、全員分の音声を消す。結果一覧（speakers.json）からも外す。"""
+    if not state:
+        return gr.update(visible=False), gr.skip()
+    for f in state["unused"] + state["mixed"]:
+        Path(f).unlink(missing_ok=True)
+    sj = SEP_DIR / state["job"] / "speakers" / "speakers.json"
+    if sj.exists():
+        keep = [x for x in json.loads(sj.read_text(encoding="utf-8")) if Path(x["file"]).exists()]
+        sj.write_text(json.dumps(keep, ensure_ascii=False, indent=2), encoding="utf-8")
+    gr.Info(f"使わなかったデータを削除しました（{len(state['unused']) + len(state['mixed'])} ファイル）")
+    return gr.update(visible=False), gr.update(choices=sep_jobs())
+
+
+def cleanup_all(state):
+    if not state:
+        return gr.update(visible=False), gr.skip()
+    shutil.rmtree(SEP_DIR / state["job"], ignore_errors=True)
+    gr.Info("取り出した結果をまるごと削除しました")
+    return gr.update(visible=False), gr.update(choices=sep_jobs(), value=None)
+
+
+def save_material(target, name, icon_file, job, paths, uploads, *checks):
+    """チェックした声（と、そのまま使う録音）を話者の素材に入れる。新しい話者ならここで作る。
+    そのあと、使わなかった声のデータを消すかを聞く。"""
     chosen = [f for f, c in zip(paths or [], checks) if c] + list(uploads or [])
     if not chosen:
         raise gr.Error("STEP2 で使う声にチェックを入れるか、録音ファイルを入れてください")
@@ -287,7 +333,8 @@ def save_material(target, name, icon_file, paths, uploads, *checks):
         shutil.copy(f, voice_dir(target) / "raw" / f"{stamp}_{Path(f).name}")
     gr.Info(f"「{spk.meta(target)['name']}」の素材に {len(chosen)} 本入れました。STEP4 で学習できます")
     add = show_add(target)
-    return [target, target, gr.update(value=gallery_items()), add[3], add[4], add[5], add[6], None, speaker_title(target)]
+    return [target, target, gr.update(value=gallery_items()), add[3], add[4], add[5], add[6], None, speaker_title(target),
+            *cleanup_offer(job, paths, checks)]
 
 
 # ---------------------------------------------------------------- STEP4: 学習
@@ -514,6 +561,13 @@ with gr.Blocks(title="Voice Studio") as demo:
             new_icon = gr.Image(label="アイコン（任意。あとからでも変えられます）", type="filepath", height=160, scale=1)
         save_btn = gr.Button("STEP3: この声で話者を作る", variant="primary")
         raw_info = gr.Markdown(raw_summary(None))
+        with gr.Group(visible=False) as clean_box:
+            clean_md = gr.Markdown()
+            with gr.Row():
+                clean_unused_btn = gr.Button("使わなかった声だけ削除（おすすめ）", variant="primary")
+                clean_all_btn = gr.Button("取り出した結果をまるごと削除", variant="stop")
+                clean_keep_btn = gr.Button("残す")
+        clean_state = gr.State(None)
 
         gr.Markdown("### STEP4　学習する", elem_classes="step")
         gr.Markdown("押したら放っておいてOK（画面を閉じても続きます）。目安: 素材25分で1時間ほど。")
@@ -559,8 +613,12 @@ with gr.Blocks(title="Voice Studio") as demo:
     sep_btn.click(start_separate, [target, sep_files, sep_urls, dereverb, denoise, speakers], sep_job)
     sep_job.change(render_job, sep_job, job_outputs)
     gr.Timer(5).tick(tick_job, [sep_job, sep_shown], job_outputs)
-    save_btn.click(save_material, [target, new_name, new_icon, sep_paths, uploads] + spk_check,
-                   [target, cur, gallery, add_title, new_fields, save_btn, raw_info, uploads, title])
+    save_btn.click(save_material, [target, new_name, new_icon, sep_shown, sep_paths, uploads] + spk_check,
+                   [target, cur, gallery, add_title, new_fields, save_btn, raw_info, uploads, title,
+                    clean_box, clean_md, clean_state])
+    clean_unused_btn.click(cleanup_unused, clean_state, [clean_box, sep_job]).then(render_job, sep_job, job_outputs)
+    clean_all_btn.click(cleanup_all, clean_state, [clean_box, sep_job])
+    clean_keep_btn.click(lambda: gr.update(visible=False), None, clean_box)
 
     start_btn.click(start_training, [target, size, tts_epochs, vc_steps, do_tts, do_vc, use_purity, purity, eval_sim],
                     status)
