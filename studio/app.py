@@ -17,7 +17,7 @@ from pathlib import Path
 
 import gradio as gr
 
-from studio import engine, post
+from studio import engine, post, style
 from studio import speakers as spk
 from studio.common import AUDIO_EXT, PY, ROOT, SEP_PY, VIDEO_EXT, VOICES, child_env, ffmpeg, read_status, voice_dir, write_status
 
@@ -456,17 +456,26 @@ def finish_controls():
 
 # ---------------------------------------------------------------- 画面
 
-CSS = """
-.tab-wrapper button { padding: 0 10px !important; }
-.step { border-left: 4px solid #e8590c; padding-left: 10px; margin-top: 14px; }
-#speakers .caption-label { font-size: 15px !important; white-space: normal !important; }
+# 話者カードは小さく並べる（画面が広いほど 1 行に多く）
+CSS = style.CSS + """
+#speakers .caption-label { font-size: 14px !important; white-space: normal !important; }
+/* カードは 1 枚 130px 前後で横に並べる（少ないときに巨大化しないように） */
+#speakers .grid-container { grid-template-columns: repeat(auto-fill, minmax(110px, 140px)) !important; }
 """
+
+
+def open_live():
+    """PC 専用の Voice Studio Live（リアルタイム声変換）を、この PC で開く。"""
+    subprocess.Popen(["cmd", "/c", "start", "", str(ROOT / "start-live.bat")], cwd=ROOT)
+    gr.Info("PC の画面に Voice Studio Live が開きます（少し待ってください）")
+
 
 _first = (spk.list_ids() or [None])[0]
 
 with gr.Blocks(title="Voice Studio") as demo:
     gr.Markdown("# 🎤 Voice Studio\n**話者を選ぶ** → **🎙 声変換** か **📝 文章読み上げ**。新しい話者は「＋」から作れます。")
-    gallery = gr.Gallery(gallery_items(), label="話者（タップして選ぶ）", columns=4, height=230, allow_preview=False,
+    gallery = gr.Gallery(gallery_items(), label="話者（タップして選ぶ）", columns=6, height=190,
+                         allow_preview=False,
                          object_fit="cover", elem_id="speakers")
     cur = gr.State(_first)        # 使う話者
     target = gr.State(None)       # 追加・育てる対象（None = 新しい話者）
@@ -488,6 +497,10 @@ with gr.Blocks(title="Voice Studio") as demo:
                     auto_pitch = gr.Checkbox(True, label="声の高さを話者に合わせる（男女差があるときはオン）")
                     semitone = gr.Slider(-12, 12, value=0, step=1, label="高さの微調整（半音）")
                     steps = gr.Slider(10, 100, value=50, step=5, label="品質（多いほど高品質・遅い）")
+                with gr.Accordion("🔴 リアルタイム声変換（PC 専用・別アプリ）", open=False):
+                    gr.Markdown("話しながらその場で声を変える機能は、PC 専用の **Voice Studio Live**（デスクトップの赤いアイコン）にあります。"
+                                "本人の同意がない声は、自分で聞く「試聴のみ」になります。")
+                    live_btn = gr.Button("🔴 Voice Studio Live を開く（PC の画面に開きます）")
             with gr.Tab("📝 文章読み上げ"):
                 text = gr.Textbox(label="読ませる文章", lines=4)
                 speak_btn = gr.Button("📝 読み上げる", variant="primary", size="lg")
@@ -622,6 +635,7 @@ with gr.Blocks(title="Voice Studio") as demo:
                     [speak_out, speak_file, speak_info, speak_raw])
     speak_redo.click(finish, [speak_raw] + speak_fx, [speak_out, speak_file])
     reload_ckpt.click(ckpt_choices, cur, ckpt)
+    live_btn.click(open_live)
 
     test_sw.change(set_test_mode, test_sw, [t0, t1, t2])
     clean_btn.click(cleanup_separated, clean_days, disk_info)
@@ -636,7 +650,7 @@ with gr.Blocks(title="Voice Studio") as demo:
 
 if __name__ == "__main__":
     # アイコン（voices/）と結果（outputs/）を画面に出せるようにする
-    opts = dict(allowed_paths=[str(OUTPUTS), str(VOICES.resolve())], css=CSS)
+    opts = dict(allowed_paths=[str(OUTPUTS), str(VOICES.resolve())], css=CSS, theme=style.theme())
     # この PC の中（127.0.0.1）だけで待ち受ける。スマホからは Tailscale の中継（tailscale serve）経由で開く。
     # Tailscale に入れるのは自分のアカウントの端末だけなので、パスワードは付けない
     url = "http://127.0.0.1:7860"

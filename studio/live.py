@@ -183,55 +183,72 @@ def stop():
 # ---------------------------------------------------------------- 画面
 
 with gr.Blocks(title="Voice Studio Live") as demo:
-    gr.Markdown("# 🔴 Voice Studio Live（PC 専用）\nリアルタイム声変換を、通話アプリなどのマイクに流します。")
-    with gr.Group() as gate:
+    gr.Markdown("# 🔴 Voice Studio Live\n話しながら、その場で声を変える（PC 専用）。")
+    with gr.Column(elem_classes="notice") as gate:
         gr.Markdown(NOTICE)
         agree = gr.Checkbox(False, label="上の内容を理解し、本人の同意を得た声だけを使います")
-        agree_btn = gr.Button("同意して始める", variant="primary")
+        agree_btn = gr.Button("同意して始める", variant="primary", elem_classes="big")
     agreed = gr.State(False)
 
     with gr.Column(visible=False) as main:
-        gr.Markdown("### 1. 話者（同意の記録がある人だけ使えます）")
-        table = gr.Dataframe(speaker_rows(), headers=["話者", "同意", "記録（誰から / 日付 / 方法）"],
-                             interactive=False, wrap=True)
-        with gr.Accordion("📝 同意を記録する・取り消す", open=False):
-            gr.Markdown("本人から「この声をリアルタイム変換・通話で使ってよい」と同意を得たときだけ記録してください。")
-            c_sid = gr.Dropdown(all_choices(), label="話者")
-            with gr.Row():
-                c_person = gr.Textbox(label="同意した人（本人の名前）")
-                c_date = gr.Textbox(label="同意を得た日", placeholder="2026-10-15")
-                c_method = gr.Dropdown(["書面", "メール・メッセージ", "口頭（記録あり）", "その他"], label="方法")
-            c_note = gr.Textbox(label="メモ（同意の範囲・保存場所など）")
-            c_sure = gr.Checkbox(False, label="この人本人から、上の内容で同意を得ています")
-            with gr.Row():
-                c_save = gr.Button("同意を記録する", variant="primary")
-                c_revoke = gr.Button("同意の記録を取り消す", variant="stop")
-        sid = gr.Dropdown(usable_choices(), label="使う話者（同意の記録がない話者は、自分で聞く試聴のみ）", value=None)
+        # ---- STEP1
+        gr.Markdown("### STEP1　話者を選ぶ", elem_classes="step")
+        with gr.Column(elem_classes="card"):
+            sid = gr.Dropdown(usable_choices(), label="話者", value=None)
+            mode_md = gr.Markdown("話者を選んでください")
+            with gr.Accordion("📝 同意の記録（記録すると通話にも使えるようになります）", open=False):
+                table = gr.Dataframe(speaker_rows(), headers=["話者", "同意", "記録（誰から / 日付 / 方法）"],
+                                     interactive=False, wrap=True)
+                gr.Markdown("本人から「この声をリアルタイム変換・通話で使ってよい」と同意を得たときだけ記録してください。",
+                            elem_classes="muted")
+                c_sid = gr.Dropdown(all_choices(), label="話者")
+                with gr.Row():
+                    c_person = gr.Textbox(label="同意した人（本人の名前）")
+                    c_date = gr.Textbox(label="同意を得た日", placeholder="2026-10-15")
+                    c_method = gr.Dropdown(["書面", "メール・メッセージ", "口頭（記録あり）", "その他"], label="方法")
+                c_note = gr.Textbox(label="メモ（同意の範囲・保存場所など）")
+                c_sure = gr.Checkbox(False, label="この人本人から、上の内容で同意を得ています")
+                with gr.Row():
+                    c_save = gr.Button("同意を記録する", variant="primary")
+                    c_revoke = gr.Button("同意の記録を取り消す", variant="stop")
 
-        gr.Markdown("### 2. 機器")
-        dev_msg = gr.Markdown()
-        with gr.Row():
-            mic = gr.Dropdown(label="入力（自分のマイク）")
-            out = gr.Dropdown(label="出力（通話に流すなら CABLE Input）")
-        reload_dev = gr.Button("機器を読み直す")
-        with gr.Accordion("⚙ 詳しい設定", open=False):
-            steps = gr.Slider(4, 30, value=10, step=1, label="品質（多いほど自然・遅れが増える）")
-            block = gr.Slider(0.15, 1.0, value=0.3, step=0.05, label="処理の区切り（秒）。短いほど遅れが少ないが途切れやすい")
+        # ---- STEP2
+        gr.Markdown("### STEP2　マイクと出力を選ぶ", elem_classes="step")
+        with gr.Column(elem_classes="card"):
+            with gr.Row():
+                mic = gr.Dropdown(label="🎤 入力（自分のマイク）")
+                out = gr.Dropdown(label="🔈 出力（試聴ならヘッドホン / 通話なら CABLE Input）")
+            dev_msg = gr.Markdown(elem_classes="muted")
+            reload_dev = gr.Button("機器を読み直す", size="sm")
+            with gr.Accordion("⚙ 詳しい設定", open=False):
+                steps = gr.Slider(4, 30, value=10, step=1, label="品質（多いほど自然・遅れが増える）")
+                block = gr.Slider(0.15, 1.0, value=0.3, step=0.05, label="処理の区切り（秒）。短いほど遅れが少ないが途切れやすい")
 
-        gr.Markdown("### 3. 開始")
-        with gr.Row():
-            start_btn = gr.Button("▶ リアルタイム変換を開く", variant="primary")
-            stop_btn = gr.Button("■ 止める", variant="stop")
-        state_msg = gr.Markdown()
-        gr.Markdown("**通話アプリ側の設定**（例: PC 版 LINE）: 設定 → 通話 → マイク を **CABLE Output (VB-Audio Virtual Cable)** にする。"
-                    "スピーカーはいつもどおり。終わったらマイクを元に戻してください。")
+        # ---- STEP3
+        gr.Markdown("### STEP3　スタート", elem_classes="step")
+        with gr.Column(elem_classes="card"):
+            with gr.Row():
+                start_btn = gr.Button("▶ リアルタイム変換を開く", variant="primary", elem_classes="big", scale=3)
+                stop_btn = gr.Button("■ 止める", variant="stop", elem_classes="big", scale=1)
+            state_msg = gr.Markdown()
+            gr.Markdown("開いた小さな画面（Seed-VC）で **Start** を押すと変換が始まります。"
+                        "通話に使うとき（同意のある話者のみ）は、通話アプリのマイクを **CABLE Output** にしてください。",
+                        elem_classes="muted")
 
     def _agree(ok):
         if not ok:
             raise gr.Error("チェックを入れてください")
         return True, gr.update(visible=False), gr.update(visible=True), *device_updates()
 
+    def _mode(s):
+        if not s:
+            return "話者を選んでください"
+        if consent(s):
+            return "📞 **通話OK**（本人の同意が記録されています）"
+        return "🎧 **試聴のみ**（同意の記録がないため、出力はヘッドホン・スピーカーだけ）"
+
     agree_btn.click(_agree, agree, [agreed, gate, main, mic, out, dev_msg])
+    sid.change(_mode, sid, mode_md)
     reload_dev.click(device_updates, None, [mic, out, dev_msg])
     c_save.click(save_consent, [c_sid, c_person, c_date, c_method, c_note, c_sure], [table, sid, c_sure])
     c_revoke.click(revoke_consent, c_sid, [table, sid])
@@ -242,6 +259,8 @@ with gr.Blocks(title="Voice Studio Live") as demo:
 if __name__ == "__main__":
     import sys
 
+    from studio import style
+
     # この PC の中だけで待ち受ける（Tailscale の中継もしない）
     demo.queue().launch(server_name="127.0.0.1", server_port=PORT, inbrowser="--no-browser" not in sys.argv,
-                        allowed_paths=[str(VOICES.resolve())])
+                        allowed_paths=[str(VOICES.resolve())], css=style.CSS, theme=style.theme("red"))

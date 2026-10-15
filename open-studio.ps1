@@ -10,11 +10,13 @@ function Test-Up {
 }
 
 # 1. Tailscale がつながっているか（切れていれば接続し直す）
-$state = (& $ts status --json | ConvertFrom-Json).BackendState
+# JSON 全体を読むと、表示名（日本語）の文字コード次第で失敗するので、必要な項目だけ取り出す
+function Get-TsState { $j = (& $ts status --json) -join "`n"; if ($j -match '"BackendState":\s*"(\w+)"') { $Matches[1] } else { "Unknown" } }
+$state = Get-TsState
 if ($state -ne "Running") {
     & $ts up | Out-Null
     Start-Sleep 5
-    $state = (& $ts status --json | ConvertFrom-Json).BackendState
+    $state = Get-TsState
 }
 
 # 2. 中継（tailscale serve）が設定されているか
