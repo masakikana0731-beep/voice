@@ -27,4 +27,15 @@ torchaudio.load = _load
 sys.path.insert(0, ".")
 script = sys.argv[1]
 sys.argv = sys.argv[1:]
-runpy.run_path(script, run_name="__main__")
+if script.endswith("real-time-gui.py"):
+    # リアルタイム変換の画面は日本語に差し替えてから動かす（元のファイルは書き換えない）
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from rt_ja import patch
+
+    path = Path(script).resolve()
+    code = compile(patch(path.read_text(encoding="utf-8")), str(path), "exec")
+    exec(code, {"__name__": "__main__", "__file__": str(path)})
+else:
+    runpy.run_path(script, run_name="__main__")
