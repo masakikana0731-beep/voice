@@ -44,7 +44,7 @@ def _alive(pid) -> bool:
 # ---------------------------------------------------------------- テストモード・全体設定
 
 FEATURES = ROOT / ".studio" / "features.json"
-N_TEST_GROUPS = 4
+N_TEST_GROUPS = 3
 
 
 def test_mode() -> bool:
@@ -76,12 +76,6 @@ def cleanup_separated(days):
             f.unlink()
     gr.Info(f"{freed / 1e9:.2f}GB 空けました")
     return disk_usage()
-
-
-def start_realtime():
-    """（テスト機能）リアルタイム声変換の画面を PC 上に開く。"""
-    subprocess.Popen(["cmd", "/c", "start", "", str(ROOT / "realtime-vc.bat")], cwd=ROOT)
-    gr.Info("PC の画面にリアルタイム声変換が開きます（初回はモデルの準備に数分かかります）")
 
 
 # ---------------------------------------------------------------- 話者の一覧・選択
@@ -494,10 +488,6 @@ with gr.Blocks(title="Voice Studio") as demo:
                     auto_pitch = gr.Checkbox(True, label="声の高さを話者に合わせる（男女差があるときはオン）")
                     semitone = gr.Slider(-12, 12, value=0, step=1, label="高さの微調整（半音）")
                     steps = gr.Slider(10, 100, value=50, step=5, label="品質（多いほど高品質・遅い）")
-                with gr.Group(visible=test_mode()) as t3:
-                    gr.Markdown("**🧪 リアルタイム声変換**（PC のマイクに話すと、その場で声が変わる。PC の画面で操作。"
-                                "Reference Audio に `voices/<話者>/ref_vc.wav` を選んでください）")
-                    rt_btn = gr.Button("PC でリアルタイム声変換を開く")
             with gr.Tab("📝 文章読み上げ"):
                 text = gr.Textbox(label="読ませる文章", lines=4)
                 speak_btn = gr.Button("📝 読み上げる", variant="primary", size="lg")
@@ -633,9 +623,8 @@ with gr.Blocks(title="Voice Studio") as demo:
     speak_redo.click(finish, [speak_raw] + speak_fx, [speak_out, speak_file])
     reload_ckpt.click(ckpt_choices, cur, ckpt)
 
-    test_sw.change(set_test_mode, test_sw, [t0, t1, t2, t3])
+    test_sw.change(set_test_mode, test_sw, [t0, t1, t2])
     clean_btn.click(cleanup_separated, clean_days, disk_info)
-    rt_btn.click(start_realtime)
 
     def _on_load(sid):
         i = spk.info(sid) if sid else None
