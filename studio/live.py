@@ -34,6 +34,8 @@ NOTICE = """
   **なりすまし・詐欺・名誉毀損**などの法的な問題になるおそれがあり、通話アプリの利用規約にも反します。
 - 使えるのは、**本人から「リアルタイム変換・通話で使ってよい」という同意を得た声**だけです。
   同意は話者ごとに記録し、記録のない話者は選べません。
+- 同意の記録がない話者は **「試聴のみ」**: ヘッドホン・スピーカーで自分で聞いて品質を確かめるだけに使えます。
+  仮想マイク・ループバックなど、他のアプリに渡せる出力には流せません。
 - 自分の声の加工や、相手も声が変わっていると分かっている場面で使ってください。
 - 使った日時は話者ごとに記録されます（`voices/<話者>/live_log.txt`）。
 """
@@ -54,8 +56,17 @@ def speaker_rows():
     return rows
 
 
+# 他のアプリにマイクとして渡せてしまう出力（仮想マイク・ループバック）。同意のない声はここに流せない
+ROUTING_WORDS = ("CABLE", "Loop", "loop", "Virtual", "VoiceMeeter", "Voicemeeter", "VB-Audio", "ステレオ ミキサー", "Stereo Mix")
+
+
+def is_routing(device: str) -> bool:
+    return any(w in (device or "") for w in ROUTING_WORDS)
+
+
 def usable_choices():
-    return [(spk.meta(s)["name"], s) for s in spk.list_ids() if consent(s)]
+    """同意の記録がある話者は「通話OK」、ない話者は「試聴のみ」（自分で聞くだけ）として選べる。"""
+    return [(spk.meta(s)["name"] + ("（通話OK）" if consent(s) else "（試聴のみ・同意なし）"), s) for s in spk.list_ids()]
 
 
 def all_choices():
@@ -127,8 +138,14 @@ def running() -> bool:
 def start(agreed, sid, mic, out, steps, block):
     if not agreed:
         raise gr.Error("最初の注意を読んで、同意してください")
-    if not sid or not consent(sid):
-        raise gr.Error("本人の同意が記録された話者だけ使えます")
+    if not sid:
+        raise gr.Error("話者を選んでください")
+    listen_only = not consent(sid)
+    if listen_only and is_routing(out):
+        # 同意の記録がない声は、通話アプリなどに渡せる出力（仮想マイク等）には流さない。
+        # 自分で聞いて品質を確かめる「試聴のみ」なら使える
+        raise gr.Error("この話者は本人の同意の記録がないため「試聴のみ」です。出力をヘッドホンかスピーカーにしてください"
+                       "（仮想マイク・ループバックには流せません）")
     if running():
         raise gr.Error("すでに起動しています")
     vdir = VOICES / sid
@@ -145,12 +162,14 @@ def start(agreed, sid, mic, out, steps, block):
     }
     RT_CONFIG.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
     with open(vdir / "live_log.txt", "a", encoding="utf-8") as f:
-        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} 開始 入力={mic} 出力={out}\n")
+        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} 開始{'（試聴のみ）' if listen_only else ''} 入力={mic} 出力={out}\n")
     _proc["p"] = subprocess.Popen(
         [str(ROOT / ".venv-vc" / "Scripts" / "python.exe"), str(ROOT / "studio" / "vc_run.py"), "real-time-gui.py"],
         cwd=SEEDVC, env=child_env(), creationflags=subprocess.CREATE_NEW_CONSOLE)
+    note = ("\n\n🎧 **試聴のみ**: 同意の記録がない話者なので、ヘッドホン・スピーカーで自分で聞く確認だけにしてください。"
+            "（変換ツールの画面で出力を仮想マイクに変えて、通話などに使うのは禁止です）") if listen_only else ""
     return ("▶ リアルタイム変換ツールを開きました。開いた画面の **「Start」** を押すと変換が始まります。"
-            "（初回はモデルの準備に数分かかります。設定はこの画面で選んだものが入っています）")
+            "（初回はモデルの準備に数分かかります。設定はこの画面で選んだものが入っています）" + note)
 
 
 def stop():
@@ -187,7 +206,7 @@ with gr.Blocks(title="Voice Studio Live") as demo:
             with gr.Row():
                 c_save = gr.Button("同意を記録する", variant="primary")
                 c_revoke = gr.Button("同意の記録を取り消す", variant="stop")
-        sid = gr.Dropdown(usable_choices(), label="使う話者", value=None)
+        sid = gr.Dropdown(usable_choices(), label="使う話者（同意の記録がない話者は、自分で聞く試聴のみ）", value=None)
 
         gr.Markdown("### 2. 機器")
         dev_msg = gr.Markdown()
