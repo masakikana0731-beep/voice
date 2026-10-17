@@ -53,7 +53,14 @@ def write_status(vdir: Path, **kw) -> None:
     st.update(kw, updated=time.strftime("%Y-%m-%d %H:%M:%S"))
     tmp = vdir / "status.json.tmp"
     tmp.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(vdir / "status.json")
+    # 画面が status.json を読んでいる瞬間だと Windows では置き換えに失敗する（アクセス拒否）。
+    # 少し待って何度かやり直し、それでもだめなら今回の更新はあきらめる（学習は止めない）
+    for _ in range(20):
+        try:
+            tmp.replace(vdir / "status.json")
+            return
+        except PermissionError:
+            time.sleep(0.1)
 
 
 def child_env() -> dict:

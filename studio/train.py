@@ -19,6 +19,8 @@ def main() -> int:
     ap.add_argument("--tts-epochs", type=int, default=3)
     ap.add_argument("--vc-steps", type=int, default=3000)
     ap.add_argument("--vc-batch", type=int, default=1, help="12GB の GPU では 1（2 だとメモリがあふれて極端に遅くなる）")
+    ap.add_argument("--vc-continue", action="store_true",
+                    help="声変換を、前回できあがったモデル（vc/ft_model.pth）の続きから学習する（延長・素材追加の再学習）")
     ap.add_argument("--rt-steps", type=int, default=2500, help="リアルタイム用モデルの学習ステップ数")
     ap.add_argument("--purity", type=float, default=0, help="（テスト機能）混ざりの除外のしきい値")
     ap.add_argument("--eval-sim", action="store_true", help="（テスト機能）採点に声の近さも使う")
@@ -59,6 +61,12 @@ def main() -> int:
         cmd = [VC_PY, ROOT / "studio" / "vc_run.py", "train.py", "--config", VC_CONFIG, "--dataset-dir", vdir / "clips_hq",
                "--run-name", args.voice, "--batch-size", args.vc_batch, "--max-steps", steps, "--max-epochs", 100000,
                "--save-every", 500, "--num-workers", 0]
+        if args.vc_continue and (vdir / "vc" / "ft_model.pth").exists():
+            # 途中保存（DiT_epoch_*）は「ステップ数の大きいものを残す」ので、前回の大きな番号が残っていると
+            # 今回の途中保存が消されてしまう。前回分は完成モデルにまとまっているので片付けてから始める
+            for old in (SEEDVC / "runs" / args.voice).glob("DiT_epoch_*.pth"):
+                old.unlink()
+            cmd += ["--pretrained-ckpt", vdir / "vc" / "ft_model.pth"]
         if run_logged(cmd, log, cwd=SEEDVC, on_line=progress) != 0:
             return fail("声変換の学習")
         from studio.speakers import keep_vc_model
