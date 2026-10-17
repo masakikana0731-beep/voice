@@ -56,6 +56,27 @@ def keep_vc_model(sid: str) -> None:
             shutil.copy2(src / name, dst / name)
 
 
+RT_CONFIG = "configs/presets/config_dit_mel_seed_uvit_xlsr_tiny.yml"
+
+
+def rt_model(sid: str) -> tuple[Path, Path] | None:
+    """リアルタイム変換用（軽量モデル）の学習済みモデル。なければ None（汎用モデルで動く）。"""
+    for d in (VOICES / sid / "rt", SEEDVC / "runs" / f"{sid}_rt"):
+        ck, cfg = d / "ft_model.pth", d / Path(RT_CONFIG).name
+        if ck.exists() and cfg.exists():
+            return ck, cfg
+    return None
+
+
+def keep_rt_model(sid: str) -> None:
+    src = SEEDVC / "runs" / f"{sid}_rt"
+    dst = VOICES / sid / "rt"
+    dst.mkdir(parents=True, exist_ok=True)
+    for name in ("ft_model.pth", Path(RT_CONFIG).name):
+        if (src / name).exists():
+            shutil.copy2(src / name, dst / name)
+
+
 def info(sid: str) -> dict:
     vdir = VOICES / sid
     raws = [p for p in (vdir / "raw").glob("*") if p.suffix.lower() in AUDIO_EXT]

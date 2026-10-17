@@ -135,7 +135,23 @@ def running() -> bool:
     return _proc["p"] is not None and _proc["p"].poll() is None
 
 
-def start(agreed, sid, mic, out, steps, block):
+# 設定の組み合わせ。遅れ ≒ 処理の区切り + 後ろを見る長さ + つなぎ目。変換にかかる時間が「区切り」を超えると途切れる
+PRESETS = {
+    "低遅延": dict(block_time=0.2, crossfade_length=0.04, extra_time_ce=2.0, extra_time=0.5, extra_time_right=0.02,
+                diffusion_steps=6, max_prompt_length=3.0),
+    "標準": dict(block_time=0.3, crossfade_length=0.06, extra_time_ce=2.5, extra_time=0.8, extra_time_right=0.05,
+               diffusion_steps=10, max_prompt_length=4.0),
+    "なめらか・リアル": dict(block_time=0.5, crossfade_length=0.1, extra_time_ce=2.5, extra_time=1.2, extra_time_right=0.1,
+                       diffusion_steps=15, max_prompt_length=5.0),
+}
+PRESET_NOTES = {
+    "低遅延": "遅れ 約0.4秒。会話向き。少しぶつ切れ感が出ることがあります",
+    "標準": "遅れ 約0.6秒。バランス型",
+    "なめらか・リアル": "遅れ 約0.9秒。つなぎ目がなめらかで自然。ゲーム実況・配信向き",
+}
+
+
+def start(agreed, sid, mic, out, preset):
     if not agreed:
         raise gr.Error("最初の注意を読んで、同意してください")
     if not sid:
@@ -155,17 +171,18 @@ def start(agreed, sid, mic, out, steps, block):
     RT_CONFIG.parent.mkdir(parents=True, exist_ok=True)
     cfg = {
         "reference_audio_path": str(ref), "sg_hostapi": HOSTAPI, "sg_wasapi_exclusive": False,
-        "sg_input_device": mic, "sg_output_device": out, "sr_type": "sr_model",
-        "diffusion_steps": int(steps), "inference_cfg_rate": 0.7, "max_prompt_length": 3.0,
-        "block_time": float(block), "crossfade_length": 0.04, "extra_time_ce": 2.5, "extra_time": 0.5,
-        "extra_time_right": 0.02,
+        "sg_input_device": mic, "sg_output_device": out, "sr_type": "sr_model", "inference_cfg_rate": 0.7,
+        **PRESETS.get(preset, PRESETS["標準"]),
     }
     RT_CONFIG.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
     with open(vdir / "live_log.txt", "a", encoding="utf-8") as f:
-        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} 開始{'（試聴のみ）' if listen_only else ''} 入力={mic} 出力={out}\n")
-    _proc["p"] = subprocess.Popen(
-        [str(ROOT / ".venv-vc" / "Scripts" / "python.exe"), str(ROOT / "studio" / "vc_run.py"), "real-time-gui.py"],
-        cwd=SEEDVC, env=child_env(), creationflags=subprocess.CREATE_NEW_CONSOLE)
+        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} 開始{'（試聴のみ）' if listen_only else ''} "
+                f"設定={preset} 入力={mic} 出力={out}\n")
+    cmd = [str(ROOT / ".venv-vc" / "Scripts" / "python.exe"), str(ROOT / "studio" / "vc_run.py"), "real-time-gui.py"]
+    model = spk.rt_model(sid)
+    if model:  # この話者の声で学習したリアルタイム用モデル（ないときは汎用モデル）
+        cmd += ["--checkpoint-path", str(model[0]), "--config-path", str(model[1])]
+    _proc["p"] = subprocess.Popen(cmd, cwd=SEEDVC, env=child_env(), creationflags=subprocess.CREATE_NEW_CONSOLE)
     note = ("\n\n🎧 **試聴のみ**: 同意の記録がない話者なので、ヘッドホン・スピーカーで自分で聞く確認だけにしてください。"
             "（変換ツールの画面で出力を仮想マイクに変えて、通話などに使うのは禁止です）") if listen_only else ""
     return ("▶ リアルタイム変換ツールを開きました。開いた画面の **「Start」** を押すと変換が始まります。"
@@ -220,9 +237,8 @@ with gr.Blocks(title="Voice Studio Live") as demo:
                 out = gr.Dropdown(label="🔈 出力（試聴ならヘッドホン / 通話なら CABLE Input）")
             dev_msg = gr.Markdown(elem_classes="muted")
             reload_dev = gr.Button("機器を読み直す", size="sm")
-            with gr.Accordion("⚙ 詳しい設定", open=False):
-                steps = gr.Slider(4, 30, value=10, step=1, label="品質（多いほど自然・遅れが増える）")
-                block = gr.Slider(0.15, 1.0, value=0.3, step=0.05, label="処理の区切り（秒）。短いほど遅れが少ないが途切れやすい")
+            preset = gr.Radio(list(PRESETS), value="標準", label="設定（ぶつ切れ感が気になるときは「なめらか・リアル」）")
+            preset_md = gr.Markdown(PRESET_NOTES["標準"], elem_classes="muted")
 
         # ---- STEP3
         gr.Markdown("### STEP3　スタート", elem_classes="step")
@@ -243,16 +259,19 @@ with gr.Blocks(title="Voice Studio Live") as demo:
     def _mode(s):
         if not s:
             return "話者を選んでください"
+        model = "🎯 この声で学習したリアルタイム用モデルを使います" if spk.rt_model(s) else \
+            "ℹ リアルタイム用モデルは未学習（汎用モデルで動きます。声の似方は控えめ）"
         if consent(s):
-            return "📞 **通話OK**（本人の同意が記録されています）"
-        return "🎧 **試聴のみ**（同意の記録がないため、出力はヘッドホン・スピーカーだけ）"
+            return "📞 **通話OK**（本人の同意が記録されています）\n\n" + model
+        return "🎧 **試聴のみ**（同意の記録がないため、出力はヘッドホン・スピーカーだけ）\n\n" + model
 
     agree_btn.click(_agree, agree, [agreed, gate, main, mic, out, dev_msg])
     sid.change(_mode, sid, mode_md)
     reload_dev.click(device_updates, None, [mic, out, dev_msg])
     c_save.click(save_consent, [c_sid, c_person, c_date, c_method, c_note, c_sure], [table, sid, c_sure])
     c_revoke.click(revoke_consent, c_sid, [table, sid])
-    start_btn.click(start, [agreed, sid, mic, out, steps, block], state_msg)
+    start_btn.click(start, [agreed, sid, mic, out, preset], state_msg)
+    preset.change(lambda p: PRESET_NOTES[p], preset, preset_md)
     stop_btn.click(stop, None, state_msg)
 
 

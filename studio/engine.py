@@ -37,12 +37,54 @@ def _load(key, path):
     return _cache["model"]
 
 
+_vc = {"proc": None}
+_vc_lock = threading.Lock()
+
+
+def _vc_request(req: dict) -> None:
+    """声変換の常駐係（studio/vc_server.py）に依頼して、終わるまで待つ。
+
+    1 回目だけモデルの読み込みに時間がかかり、2 回目からはすぐに変換が始まる。
+    常駐係が落ちていたら起動し直す。
+    """
+    import json
+
+    with _vc_lock:
+        p = _vc["proc"]
+        if p is None or p.poll() is not None:
+            p = subprocess.Popen(
+                [str(VC_PY), str(ROOT / "studio" / "vc_run.py"), str(ROOT / "studio" / "vc_server.py")],
+                cwd=SEEDVC, env=child_env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW)
+            _vc["proc"] = p
+        p.stdin.write(json.dumps(req, ensure_ascii=False) + "\n")
+        p.stdin.flush()
+        tail = []
+        for line in p.stdout:
+            line = line.rstrip()
+            if line == "@@DONE":
+                return
+            if line.startswith("@@ERR"):
+                raise RuntimeError("声変換に失敗しました: " + line[5:] + "\n" + "\n".join(tail[-15:]))
+            tail.append(line)
+        _vc["proc"] = None
+        raise RuntimeError("声変換の常駐係が止まりました:\n" + "\n".join(tail[-20:]))
+
+
+def stop_vc_server() -> None:
+    p = _vc["proc"]
+    if p is not None and p.poll() is None:
+        p.kill()
+    _vc["proc"] = None
+
+
 def unload() -> None:
-    """読み込んだモデルを GPU から外す（学習に GPU メモリを譲るため）。"""
+    """読み込んだモデルを GPU から外す（学習に GPU メモリを譲るため）。声変換の常駐係も止める。"""
     import gc
 
     import torch
 
+    stop_vc_server()
     with _lock:
         _cache.update(key=None, model=None)
         gc.collect()
@@ -169,19 +211,13 @@ def convert(voice: str, source: str, steps: int = 50, auto_pitch: bool = True, s
         for i, (s0, e0) in enumerate(spans):
             sf.write(seg_dir / f"{i:03d}.wav", y[s0:e0], sr)
 
-        cmd = [str(VC_PY), str(ROOT / "studio" / "vc_run.py"), str(ROOT / "studio" / "vc_batch.py"),
-               "--segments", str(seg_dir), "--target", str(ref), "--out", str(out_dir),
-               "--diffusion-steps", str(steps), "--auto-f0-adjust", str(auto_pitch), "--semi-tone-shift", str(semitone)]
-        if model:
-            cmd += ["--checkpoint", str(model[0]), "--config", str(model[1])]
-            how = "学習済みモデル"
-        else:
-            how = "未学習（参照音声からのゼロショット変換）"
-        p = subprocess.run(cmd, cwd=SEEDVC, env=child_env(), capture_output=True, text=True,
-                           encoding="utf-8", errors="replace")
+        how = "学習済みモデル" if model else "未学習（参照音声からのゼロショット変換）"
+        _vc_request({"segments": str(seg_dir), "target": str(ref), "out": str(out_dir), "steps": int(steps),
+                     "auto_pitch": bool(auto_pitch), "semitone": int(semitone),
+                     "checkpoint": str(model[0]) if model else None, "config": str(model[1]) if model else None})
         outs = [out_dir / f"{i:03d}.wav" for i in range(len(spans))]
-        if p.returncode != 0 or not all(f.exists() for f in outs):
-            raise RuntimeError("声変換に失敗しました:\n" + (p.stdout + p.stderr)[-1500:])
+        if not all(f.exists() for f in outs):
+            raise RuntimeError("声変換に失敗しました（結果のファイルがありません）")
 
         # つなぎ目は無音の中なので、10ms だけ重ねてなめらかにつなぐ
         fade = int(0.01 * sr)

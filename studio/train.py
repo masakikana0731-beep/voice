@@ -19,9 +19,10 @@ def main() -> int:
     ap.add_argument("--tts-epochs", type=int, default=3)
     ap.add_argument("--vc-steps", type=int, default=3000)
     ap.add_argument("--vc-batch", type=int, default=1, help="12GB の GPU では 1（2 だとメモリがあふれて極端に遅くなる）")
+    ap.add_argument("--rt-steps", type=int, default=2500, help="リアルタイム用モデルの学習ステップ数")
     ap.add_argument("--purity", type=float, default=0, help="（テスト機能）混ざりの除外のしきい値")
     ap.add_argument("--eval-sim", action="store_true", help="（テスト機能）採点に声の近さも使う")
-    ap.add_argument("--skip", action="append", default=[], choices=["prep", "tts", "vc"])
+    ap.add_argument("--skip", action="append", default=[], choices=["prep", "tts", "vc", "rt"])
     args = ap.parse_args()
 
     vdir = VOICES / args.voice
@@ -64,6 +65,26 @@ def main() -> int:
 
         keep_vc_model(args.voice)  # 話者フォルダ（voices/<名前>/vc）にもまとめて保存
         write_status(vdir, vc_checkpoint=str(vdir / "vc" / "ft_model.pth"))
+
+    if "rt" not in args.skip:
+        # リアルタイム変換（Voice Studio Live）用の軽いモデル。声変換のモデルは重くてリアルタイムに使えないため別に学習する
+        from studio.speakers import RT_CONFIG, keep_rt_model
+
+        rt_steps = args.rt_steps
+
+        def rt_progress(line):
+            m = re.search(r"step (\d+), loss: ([\d.]+)", line)
+            if m:
+                write_status(vdir, stage="rt", progress=round(int(m.group(1)) / rt_steps, 3),
+                             message=f"リアルタイム用の学習 step {m.group(1)}/{rt_steps}")
+
+        write_status(vdir, stage="rt", message="リアルタイム用の学習を準備中", progress=0)
+        cmd = [VC_PY, ROOT / "studio" / "vc_run.py", "train.py", "--config", RT_CONFIG, "--dataset-dir", vdir / "clips_hq",
+               "--run-name", f"{args.voice}_rt", "--batch-size", 2, "--max-steps", rt_steps, "--max-epochs", 100000,
+               "--save-every", 500, "--num-workers", 0]
+        if run_logged(cmd, log, cwd=SEEDVC, on_line=rt_progress) != 0:
+            return fail("リアルタイム用の学習")
+        keep_rt_model(args.voice)
 
     write_status(vdir, stage="done", message="すべての学習が完了しました", progress=1, pid=None)
     return 0

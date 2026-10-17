@@ -346,7 +346,7 @@ def start_training(sid, size, tts_epochs, vc_steps, do_tts, do_vc, use_purity=Fa
     if not do_tts:
         cmd += ["--skip", "tts"]
     if not do_vc:
-        cmd += ["--skip", "vc"]
+        cmd += ["--skip", "vc", "--skip", "rt"]  # リアルタイム用も声変換の一種なので一緒に飛ばす
     if test_mode() and use_purity:
         cmd += ["--purity", str(purity)]
     if test_mode() and eval_sim:
