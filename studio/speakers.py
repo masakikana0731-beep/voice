@@ -47,9 +47,14 @@ def vc_model(sid: str) -> tuple[Path, Path] | None:
 
 
 def keep_vc_model(sid: str) -> None:
-    """学習が終わった声変換モデルを話者フォルダにコピーしておく（話者ごとにまとめて保存するため）。"""
+    """学習が終わった声変換モデルを話者フォルダにコピーしておく（話者ごとにまとめて保存するため）。
+    前のモデルは vc_prev/ に退避する（学習しすぎて悪くなったときに戻せるように）。"""
     src = SEEDVC / "runs" / sid
     dst = VOICES / sid / "vc"
+    if (dst / "ft_model.pth").exists():
+        prev = VOICES / sid / "vc_prev"
+        shutil.rmtree(prev, ignore_errors=True)
+        shutil.copytree(dst, prev)
     dst.mkdir(parents=True, exist_ok=True)
     for name in ("ft_model.pth", Path(VC_CONFIG).name):
         if (src / name).exists():

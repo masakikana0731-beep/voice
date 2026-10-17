@@ -71,8 +71,27 @@ def main() -> int:
             return fail("声変換の学習")
         from studio.speakers import keep_vc_model
 
-        keep_vc_model(args.voice)  # 話者フォルダ（voices/<名前>/vc）にもまとめて保存
+        keep_vc_model(args.voice)  # 話者フォルダ（voices/<名前>/vc）にもまとめて保存。前のモデルは vc_prev/ へ
         write_status(vdir, vc_checkpoint=str(vdir / "vc" / "ft_model.pth"))
+
+        # 前のモデルがあれば、同じテスト音声で採点して良いほうを残す（学習しすぎで悪くなることがあるため）
+        prev = vdir / "vc_prev"
+        if (prev / "ft_model.pth").exists():
+            import shutil
+
+            from studio.vc_eval import score
+
+            write_status(vdir, stage="vc", message="新しいモデルと前のモデルを比べています")
+            new_s, old_s = score(args.voice, vdir / "vc"), score(args.voice, prev)
+            if old_s > new_s + 0.01:
+                shutil.rmtree(vdir / "vc")
+                shutil.copytree(prev, vdir / "vc")
+                msg = f"前のモデルのほうが良かったので戻しました（似ている度 前 {old_s} / 新 {new_s}）"
+            else:
+                msg = f"新しいモデルを使います（似ている度 前 {old_s} / 新 {new_s}）"
+            write_status(vdir, vc_compare=msg)
+            with open(log, "a", encoding="utf-8") as f:
+                f.write(f"[vc_eval] {msg}\n")
 
     if "rt" not in args.skip:
         # リアルタイム変換（Voice Studio Live）用の軽いモデル。声変換のモデルは重くてリアルタイムに使えないため別に学習する
