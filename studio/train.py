@@ -93,6 +93,10 @@ def main() -> int:
             with open(log, "a", encoding="utf-8") as f:
                 f.write(f"[vc_eval] {msg}\n")
 
+        # 参照音声と寄せ具合を選び直す（素材やモデルが変わると、いちばん良い組み合わせも変わるため）
+        write_status(vdir, stage="vc", message="声変換の設定を最適化しています")
+        run_logged([PY, "-m", "studio.vc_tune", args.voice], log)
+
     if "rt" not in args.skip:
         # リアルタイム変換（Voice Studio Live）用の軽いモデル。声変換のモデルは重くてリアルタイムに使えないため別に学習する
         from studio.speakers import RT_CONFIG, keep_rt_model

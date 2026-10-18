@@ -43,8 +43,28 @@ JA = {
 }
 
 
+GATE_ANCHOR = '            print(f"Time taken for VAD: {elapsed_time_ms}ms")\n'
+GATE_CODE = '''            # --- Voice Studio Live: ノイズゲート（話していないときの雑音を無音にする）
+            if _LIVE_GATE_DB is not None and np.sqrt(np.mean(indata ** 2) + 1e-12) < 10 ** (_LIVE_GATE_DB / 20):
+                indata = indata * 0
+'''
+GATE_HEADER = '''
+# --- Voice Studio Live の追加設定（configs/inuse/live_extra.json）
+try:
+    import json as _json
+    _LIVE_GATE_DB = _json.load(open("configs/inuse/live_extra.json", encoding="utf-8")).get("noise_gate_db")
+except Exception:
+    _LIVE_GATE_DB = None
+'''
+
+
 def patch(source: str) -> str:
-    """ソース中の文字列リテラル（"..."）のうち、表示用のものだけを日本語に置き換える。"""
+    """ソース中の文字列リテラル（"..."）のうち、表示用のものだけを日本語に置き換え、ノイズゲートを足す。"""
     for en, ja in JA.items():
         source = source.replace(f'"{en}"', f'"{ja}"')
+    if GATE_ANCHOR in source:
+        source = source.replace(GATE_ANCHOR, GATE_ANCHOR + GATE_CODE, 1)
+        # import 群のあと（最初の関数定義・デコレータの前）に設定の読み込みを入れる
+        i = min(x for x in (source.find("\ndef "), source.find("\n@"), source.find("\nclass ")) if x >= 0)
+        source = source[:i] + GATE_HEADER + source[i:]
     return source

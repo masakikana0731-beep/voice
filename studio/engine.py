@@ -97,34 +97,146 @@ def _max_tokens(text: str) -> int:
     return max(96, int(len(text) * 3.5) + 48)
 
 
+# ---------------------------------------------------------------- 読み方辞書・文の区切り
+
+DICT_FILE = VOICES / "_dictionary.json"
+
+
+def load_dict() -> list[list[str]]:
+    """読み方辞書 [[表記, 読み], ...]（全話者で共通）。"""
+    import json
+
+    try:
+        return json.loads(DICT_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+
+
+def save_dict(rows) -> None:
+    import json
+
+    rows = [[str(a).strip(), str(b).strip()] for a, b in rows if str(a).strip() and str(b).strip()]
+    DICT_FILE.parent.mkdir(exist_ok=True)
+    DICT_FILE.write_text(json.dumps(rows, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def apply_dict(text: str) -> str:
+    # 長い表記から先に置き換える（「KIBA BREEZE」より先に「KIBA」が置き換わらないように）
+    for a, b in sorted(load_dict(), key=lambda r: -len(r[0])):
+        text = text.replace(a, b)
+    return text
+
+
+def split_text(text: str, max_chars: int = 60) -> list[str]:
+    """文ごと（。！？改行）に区切り、短い文はまとめて max_chars 以下のかたまりにする。
+    長い文章を一度に読ませると崩れやすいので、かたまりごとに読ませてつなぐ。"""
+    import re
+
+    sents = [x.strip() for x in re.split(r"(?<=[。！？!?])|\n+", text) if x and x.strip()]
+    chunks, cur = [], ""
+    for x in sents:
+        while len(x) > max_chars:  # 句点のない長い文は読点で切る
+            cut = x.rfind("、", 0, max_chars)
+            cut = cut + 1 if cut > 10 else max_chars
+            if cur:
+                chunks.append(cur)
+                cur = ""
+            chunks.append(x[:cut])
+            x = x[cut:]
+        if cur and len(cur) + len(x) > max_chars:
+            chunks.append(cur)
+            cur = ""
+        cur += x
+    if cur:
+        chunks.append(cur)
+    return chunks or [text]
+
+
+def _join(wavs, sr, pause: float = 0.35):
+    gap = np.zeros(int(pause * sr), dtype=np.float32)
+    out = []
+    for i, w in enumerate(wavs):
+        out += [np.asarray(w, dtype=np.float32)] + ([gap] if i < len(wavs) - 1 else [])
+    return np.concatenate(out)
+
+
 def speak(voice: str, text: str, checkpoint: str | None, instruct: str = "", sub: str = "tts") -> tuple[Path, str]:
-    """学習済みなら学習した声で、未学習なら参照音声からのクローンで読み上げる。"""
+    """学習済みなら学習した声で、未学習なら参照音声からのクローンで読み上げる。
+    読み方辞書を当て、文ごとに区切って読ませてから、自然な間でつなぐ。"""
     import soundfile as sf
 
     from tts import fetch_model
 
     vdir = VOICES / voice
+    chunks = split_text(apply_dict(text))
     with _lock:
         t0 = time.time()
+        wavs = []
         if checkpoint:
             model = _load(("ft", voice, sub, checkpoint), vdir / sub / checkpoint)
-            # 公式の学習コードは言語指定なし（Auto）の形式で学習するので、読み上げ時も Auto にそろえる。
-            # "Japanese" を指定すると学習時と違う先頭トークンになり、話し終わらない・雑音になる
-            wavs, sr = model.generate_custom_voice(text=text, language="Auto", speaker=SPEAKER,
-                                                   instruct=instruct or None, max_new_tokens=_max_tokens(text))
+            for c in chunks:
+                # 公式の学習コードは言語指定なし（Auto）の形式で学習するので、読み上げ時も Auto にそろえる。
+                # "Japanese" を指定すると学習時と違う先頭トークンになり、話し終わらない・雑音になる
+                w, sr = model.generate_custom_voice(text=c, language="Auto", speaker=SPEAKER,
+                                                    instruct=instruct or None, max_new_tokens=_max_tokens(c))
+                wavs.append(w[0])
             how = f"学習済みモデル {checkpoint}"
         else:
             if not (vdir / "ref.wav").exists():
                 raise RuntimeError("まだ学習データの準備（または学習）をしていません")
             model = _load(("base",), fetch_model("Qwen/Qwen3-TTS-12Hz-1.7B-Base"))
             ref_text = (vdir / "ref.txt").read_text(encoding="utf-8")
-            wavs, sr = model.generate_voice_clone(text=text, language="Japanese", ref_audio=str(vdir / "ref.wav"),
-                                                  ref_text=ref_text, max_new_tokens=_max_tokens(text))
+            for c in chunks:
+                w, sr = model.generate_voice_clone(text=c, language="Japanese", ref_audio=str(vdir / "ref.wav"),
+                                                   ref_text=ref_text, max_new_tokens=_max_tokens(c))
+                wavs.append(w[0])
             how = "未学習（参照音声からのクローン）"
         out = OUT / voice / f"tts_{time.strftime('%Y%m%d-%H%M%S')}.wav"
         out.parent.mkdir(parents=True, exist_ok=True)
-        sf.write(out, wavs[0], sr)
-    return out, f"{how} / {time.time() - t0:.1f}秒"
+        sf.write(out, _join(wavs, sr), sr)
+    return out, f"{how} / {len(chunks)} 文 / {time.time() - t0:.1f}秒"
+
+
+EMOTIONS = {
+    "嬉しい": "とても嬉しそうに、明るく弾んだ声で",
+    "楽しい": "楽しそうに、笑顔で話すように",
+    "悲しい": "悲しそうに、少し声を落として",
+    "泣きそう": "今にも泣き出しそうな、震える声で",
+    "怒り": "怒った様子で、強い口調で",
+    "驚き": "とても驚いた様子で",
+    "照れ": "照れくさそうに、少し恥ずかしそうに",
+    "ささやき": "耳元でささやくように、小さな声で",
+    "元気": "元気いっぱいに、はきはきと",
+    "落ち着き": "落ち着いた、穏やかな声で",
+}
+
+
+def speak_emotion(voice: str, text: str, emotion: str) -> tuple[Path, str]:
+    """感情つき読み上げ。感情の指示が効く内蔵の声（Ono_Anna）で読ませてから、この話者の声に変換する。
+    本人の同意を記録した話者だけ使える。"""
+    import soundfile as sf
+
+    from studio.speakers import require_consent
+    from tts import fetch_model
+
+    require_consent(voice, "感情つき読み上げ")
+    instruct = EMOTIONS.get(emotion, emotion)
+    chunks = split_text(apply_dict(text))
+    with _lock:
+        t0 = time.time()
+        model = _load(("custom",), fetch_model("Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"))
+        wavs = []
+        for c in chunks:
+            w, sr = model.generate_custom_voice(text=c, language="Japanese", speaker="Ono_Anna", instruct=instruct,
+                                                max_new_tokens=_max_tokens(c))
+            wavs.append(w[0])
+        tmp = OUT / voice / f"emo_src_{time.strftime('%Y%m%d-%H%M%S')}.wav"
+        tmp.parent.mkdir(parents=True, exist_ok=True)
+        sf.write(tmp, _join(wavs, sr), sr)
+        t1 = time.time() - t0
+    out, info = convert(voice, str(tmp), name="emo")
+    tmp.unlink(missing_ok=True)
+    return out, f"感情「{emotion}」で読み上げ（{t1:.1f}秒）→ 声変換（{info}）"
 
 
 SR_VC = 44100
@@ -150,8 +262,9 @@ def vc_reference(vdir: Path, target_sec: float = 12.0) -> Path:
         y, sr = sf.read(f, dtype="float32")
         if y.ndim > 1:
             y = y.mean(axis=1)
-        if not 3 <= len(y) / sr <= 10 or np.sqrt((y ** 2).mean()) < 0.02:  # 短すぎ・小さすぎる区間は使わない
+        if len(y) / sr < 3 or np.sqrt((y ** 2).mean()) < 0.02:  # 短すぎ・小さすぎる区間は使わない
             continue
+        y = y[: int(10 * sr)]  # 長いクリップは 10 秒まで使う
         pieces += [y, np.zeros(int(0.2 * sr), dtype=np.float32)]
         total += len(y) / sr
         used.add(f.name)
@@ -183,7 +296,34 @@ def split_at_silence(y, sr, max_sec: float = 15.0):
     return out
 
 
-def convert(voice: str, source: str, steps: int = 50, auto_pitch: bool = True, semitone: int = 0) -> tuple[Path, str]:
+def vc_settings(voice: str) -> dict:
+    """話者ごとの声変換の最適設定（studio/vc_tune.py が決める）。{"ref": ファイル名, "cfg": 0.7, "steps": 50}"""
+    import json
+
+    try:
+        return json.loads((VOICES / voice / "vc_settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _vc_ref(voice: str) -> Path:
+    st = vc_settings(voice)
+    if st.get("ref") and (VOICES / voice / st["ref"]).exists():
+        return VOICES / voice / st["ref"]
+    return vc_reference(VOICES / voice)
+
+
+def warm_vc(voice: str) -> None:
+    """声変換の常駐係に、この話者のモデルを先に読み込ませておく（1 回目の待ちをなくす）。"""
+    from studio.speakers import vc_model
+
+    model = vc_model(voice)
+    if model:
+        _vc_request({"warm": True, "checkpoint": str(model[0]), "config": str(model[1])})
+
+
+def convert(voice: str, source: str, steps: int | None = None, auto_pitch: bool = True, semitone: int = 0,
+            name: str = "vc") -> tuple[Path, str]:
     """録音を学習した声に変換する。抑揚（声の高さの動き）・間はそのまま残る。
 
     無音で 15 秒以下に区切って変換し、つなぎ直す（Seed-VC 内部の区切りで音が途切れるのを防ぐ）。
@@ -193,7 +333,9 @@ def convert(voice: str, source: str, steps: int = 50, auto_pitch: bool = True, s
     vdir = VOICES / voice
     if not (vdir / "ref_hq.wav").exists():
         raise RuntimeError("まだ学習データの準備（または学習）をしていません")
-    ref = vc_reference(vdir)
+    ref = _vc_ref(voice)
+    st = vc_settings(voice)
+    steps = int(steps or st.get("steps", 50))
     from studio.speakers import vc_model
 
     model = vc_model(voice)
@@ -213,7 +355,7 @@ def convert(voice: str, source: str, steps: int = 50, auto_pitch: bool = True, s
 
         how = "学習済みモデル" if model else "未学習（参照音声からのゼロショット変換）"
         _vc_request({"segments": str(seg_dir), "target": str(ref), "out": str(out_dir), "steps": int(steps),
-                     "auto_pitch": bool(auto_pitch), "semitone": int(semitone),
+                     "auto_pitch": bool(auto_pitch), "semitone": int(semitone), "cfg": float(st.get("cfg", 0.7)),
                      "checkpoint": str(model[0]) if model else None, "config": str(model[1]) if model else None})
         outs = [out_dir / f"{i:03d}.wav" for i in range(len(spans))]
         if not all(f.exists() for f in outs):
@@ -231,10 +373,61 @@ def convert(voice: str, source: str, steps: int = 50, auto_pitch: bool = True, s
                 continue
             w = np.linspace(0, 1, fade, dtype=np.float32)
             joined = np.concatenate([joined[:-fade], joined[-fade:] * (1 - w) + z[:fade] * w, z[fade:]])
-        out = OUT / voice / f"vc_{time.strftime('%Y%m%d-%H%M%S')}.wav"
+        out = OUT / voice / f"{name}_{time.strftime('%Y%m%d-%H%M%S')}.wav"
         out.parent.mkdir(parents=True, exist_ok=True)
         sf.write(out, joined, zsr)
     return out, f"{how} / {len(spans)} 区間 / {time.time() - t0:.1f}秒"
+
+
+def sing(voice: str, source: str, separate: bool = True, semitone: int = 0, accomp_db: float = 0.0) -> tuple[Path, str]:
+    """歌声変換。曲から歌声と伴奏を分け、歌声だけをこの話者の声に変えて、伴奏と混ぜ直す。
+    メロディ（音の高さ）はそのまま残す。本人の同意を記録した話者だけ使える。"""
+    import soundfile as sf
+
+    from studio.common import SEP_PY
+    from studio.speakers import require_consent
+
+    require_consent(voice, "歌声変換")
+    t0 = time.time()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        if separate:
+            subprocess.run([str(SEP_PY), "-m", "studio.split_song", str(Path(source).resolve()), "-o", str(tmp)],
+                           cwd=ROOT, env=child_env(), check=True, capture_output=True)
+            vocal, accomp = tmp / "vocals.wav", tmp / "accompaniment.wav"
+        else:
+            vocal, accomp = Path(source), None
+        # 歌は音の高さを話者に合わせない（メロディが変わってしまうため）。高さは半音単位で手動で変える
+        conv, info = convert(voice, str(vocal), auto_pitch=False, semitone=semitone, name="sing_voice")
+        v, sr = sf.read(conv, dtype="float32")
+        if accomp is not None and accomp.exists():
+            a, asr = sf.read(accomp, dtype="float32", always_2d=True)
+            a = a.mean(axis=1)
+            if asr != sr:
+                import librosa
+
+                a = librosa.resample(a, orig_sr=asr, target_sr=sr)
+            n = max(len(v), len(a))
+            mix = np.zeros(n, dtype=np.float32)
+            mix[: len(v)] += v
+            mix[: len(a)] += a * (10 ** (accomp_db / 20))
+            peak = np.abs(mix).max()
+            if peak > 0.95:
+                mix *= 0.95 / peak
+        else:
+            mix = v
+        out = OUT / voice / f"sing_{time.strftime('%Y%m%d-%H%M%S')}.wav"
+        sf.write(out, mix, sr)
+        conv.unlink(missing_ok=True)
+    return out, f"歌声変換（伴奏{'あり' if separate else 'なし'}）/ {time.time() - t0:.1f}秒"
+
+
+def history(voice: str, limit: int = 40) -> list[Path]:
+    """作った音声（保存用の mp3、新しい順）。"""
+    d = OUT / voice
+    if not d.exists():
+        return []
+    return sorted(d.glob("*.mp3"), key=lambda f: f.stat().st_mtime, reverse=True)[:limit]
 
 
 def status_text(voice: str) -> str:

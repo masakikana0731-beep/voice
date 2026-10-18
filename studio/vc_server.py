@@ -35,6 +35,10 @@ inference.load_models = cached_load
 
 
 def handle(req):
+    if req.get("warm"):  # モデルを先に読み込むだけ（1 回目の変換の待ちをなくす）
+        inference.load_models(argparse.Namespace(checkpoint=req.get("checkpoint"), config=req.get("config"),
+                                                 f0_condition=True, fp16=True))
+        return
     out = Path(req["out"])
     out.mkdir(parents=True, exist_ok=True)
     for seg in sorted(Path(req["segments"]).glob("*.wav")):

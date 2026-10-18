@@ -43,8 +43,7 @@ NOTICE = """
 
 # ---------------------------------------------------------------- 同意の記録
 
-def consent(sid: str) -> dict | None:
-    return spk.meta(sid).get("consent")
+consent = spk.consent  # 同意の記録は Voice Studio と共通（voices/<話者>/meta.json）
 
 
 def speaker_rows():
@@ -78,10 +77,10 @@ def save_consent(sid, person, date, method, note, sure):
         raise gr.Error("話者を選んでください")
     if not sure:
         raise gr.Error("「本人から同意を得ています」にチェックを入れてください")
-    if not person.strip() or not date.strip() or not method:
-        raise gr.Error("同意した人・日付・方法を入れてください")
-    spk.save_meta(sid, consent={"person": person.strip(), "date": date.strip(), "method": method,
-                                "note": note.strip(), "recorded": time.strftime("%Y-%m-%d %H:%M")})
+    try:
+        spk.set_consent(sid, person, date, method, note)
+    except ValueError as e:
+        raise gr.Error(str(e))
     gr.Info(f"「{spk.meta(sid)['name']}」の同意を記録しました")
     return speaker_rows(), gr.update(choices=usable_choices()), False
 
@@ -89,11 +88,8 @@ def save_consent(sid, person, date, method, note, sure):
 def revoke_consent(sid):
     if not sid:
         raise gr.Error("話者を選んでください")
-    m = spk.meta(sid)
-    if "consent" in m:
-        del m["consent"]
-        (VOICES / sid / "meta.json").write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
-    gr.Info(f"「{m['name']}」の同意の記録を取り消しました（もう使えません）")
+    spk.clear_consent(sid)
+    gr.Info(f"「{spk.meta(sid)['name']}」の同意の記録を取り消しました（もう使えません）")
     return speaker_rows(), gr.update(choices=usable_choices(), value=None)
 
 
@@ -151,7 +147,7 @@ PRESET_NOTES = {
 }
 
 
-def start(agreed, sid, mic, out, preset):
+def start(agreed, sid, mic, out, preset, gate_db=-45):
     if not agreed:
         raise gr.Error("最初の注意を読んで、同意してください")
     if not sid:
@@ -165,9 +161,9 @@ def start(agreed, sid, mic, out, preset):
     if running():
         raise gr.Error("すでに起動しています")
     vdir = VOICES / sid
-    from studio.engine import vc_reference
+    from studio.engine import _vc_ref
 
-    ref = vc_reference(vdir)
+    ref = _vc_ref(sid)  # 最適化で選んだ参照音声（なければ標準のもの）
     RT_CONFIG.parent.mkdir(parents=True, exist_ok=True)
     cfg = {
         "reference_audio_path": str(ref), "sg_hostapi": HOSTAPI, "sg_wasapi_exclusive": False,
@@ -175,6 +171,9 @@ def start(agreed, sid, mic, out, preset):
         **PRESETS.get(preset, PRESETS["標準"]),
     }
     RT_CONFIG.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+    # ノイズゲート（studio/rt_ja.py が変換ツールに組み込む）。-70 はオフ
+    extra = {"noise_gate_db": None if gate_db <= -70 else float(gate_db)}
+    (RT_CONFIG.parent / "live_extra.json").write_text(json.dumps(extra), encoding="utf-8")
     with open(vdir / "live_log.txt", "a", encoding="utf-8") as f:
         f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} 開始{'（試聴のみ）' if listen_only else ''} "
                 f"設定={preset} 入力={mic} 出力={out}\n")
@@ -239,6 +238,14 @@ with gr.Blocks(title="Voice Studio Live") as demo:
             reload_dev = gr.Button("機器を読み直す", size="sm")
             preset = gr.Radio(list(PRESETS), value="標準", label="設定（ぶつ切れ感が気になるときは「なめらか・リアル」）")
             preset_md = gr.Markdown(PRESET_NOTES["標準"], elem_classes="muted")
+            gate = gr.Slider(-70, -25, value=-45, step=1,
+                             label="ノイズゲート（dB）: この音量より小さい音は無音にする。雑音で変な声が出るなら上げる（-70 でオフ）")
+            with gr.Accordion("🎧 通話しながら、変換後の声を自分でも聞くには", open=False):
+                gr.Markdown("出力を CABLE Input にしているときは、Windows の設定で聞けます（PC の設定の変更なので、ご自身で行ってください）。\n\n"
+                            "1. 設定 → システム → サウンド → 「サウンドの詳細設定」\n"
+                            "2. 「録音」タブ → **CABLE Output** を右クリック → プロパティ → 「聴く」タブ\n"
+                            "3. **「このデバイスを聴く」にチェック** → 再生するデバイスにヘッドホンを選んで OK\n\n"
+                            "やめるときは同じチェックを外してください。", elem_classes="muted")
 
         # ---- STEP3
         gr.Markdown("### STEP3　スタート", elem_classes="step")
@@ -270,7 +277,7 @@ with gr.Blocks(title="Voice Studio Live") as demo:
     reload_dev.click(device_updates, None, [mic, out, dev_msg])
     c_save.click(save_consent, [c_sid, c_person, c_date, c_method, c_note, c_sure], [table, sid, c_sure])
     c_revoke.click(revoke_consent, c_sid, [table, sid])
-    start_btn.click(start, [agreed, sid, mic, out, preset], state_msg)
+    start_btn.click(start, [agreed, sid, mic, out, preset, gate], state_msg)
     preset.change(lambda p: PRESET_NOTES[p], preset, preset_md)
     stop_btn.click(stop, None, state_msg)
 

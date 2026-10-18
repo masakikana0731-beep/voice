@@ -37,6 +37,39 @@ def save_meta(sid: str, **kw) -> None:
     (VOICES / sid / "meta.json").write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+# ---------------------------------------------------------------- 本人の同意の記録
+
+CONSENT_METHODS = ["書面", "メール・メッセージ", "口頭（記録あり）", "その他"]
+
+
+def consent(sid: str) -> dict | None:
+    """本人の同意の記録（誰から・いつ・どうやって）。なければ None。
+
+    同意の記録がない話者では、新しい発言を作りやすい機能（感情つき読み上げ・歌声変換・チャットでの自動変換・
+    リアルタイムを通話に流す）は使えない。
+    """
+    return meta(sid).get("consent") if sid else None
+
+
+def set_consent(sid: str, person: str, date: str, method: str, note: str = "") -> None:
+    if not (person.strip() and date.strip() and method):
+        raise ValueError("同意した人・日付・方法を入れてください")
+    save_meta(sid, consent={"person": person.strip(), "date": date.strip(), "method": method,
+                            "note": note.strip(), "recorded": time.strftime("%Y-%m-%d %H:%M")})
+
+
+def clear_consent(sid: str) -> None:
+    m = meta(sid)
+    m.pop("consent", None)
+    (VOICES / sid / "meta.json").write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def require_consent(sid: str, what: str) -> None:
+    if not consent(sid):
+        raise PermissionError(f"「{what}」は、本人の同意を記録した話者だけ使えます"
+                              "（この話者の設定 → 同意の記録）")
+
+
 def vc_model(sid: str) -> tuple[Path, Path] | None:
     """声変換の学習済みモデル（チェックポイント, 設定）。話者フォルダになければ学習の作業場所を見る。"""
     for d in (VOICES / sid / "vc", SEEDVC / "runs" / sid):

@@ -76,9 +76,23 @@ def _ambience(n, sr, amount, rng, kind):
     return noise * (10 ** ((-60 + 30 * amount / 100) / 20))  # 0→ -60dB, 100→ -30dB
 
 
-def apply(wav, preset="なし", reverb=0, echo=0, ambience=0, lips=0, seed=0) -> Path:
+def clean(wav) -> Path:
+    """AI クリーンアップ（studio/cleanup.py を .venv-sep で実行）。変換で出たザラつき・雑音を取る。"""
+    import subprocess
+
+    from studio.common import ROOT, SEP_PY, child_env
+
+    out = Path(wav).with_name(Path(wav).stem + "_clean.wav")
+    subprocess.run([str(SEP_PY), "-m", "studio.cleanup", str(Path(wav).resolve()), str(out)],
+                   cwd=ROOT, env=child_env(), check=True, capture_output=True)
+    return out
+
+
+def apply(wav, preset="なし", reverb=0, echo=0, ambience=0, lips=0, seed=0, ai_clean=False) -> Path:
     from pedalboard import Delay, Pedalboard, Reverb
 
+    if ai_clean:  # 響きなどを足す前に、変換で出た雑音を取っておく
+        wav = clean(wav)
     y, sr = sf.read(wav, dtype="float32")
     if y.ndim > 1:
         y = y.mean(axis=1)
