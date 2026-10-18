@@ -152,49 +152,137 @@ def split_text(text: str, max_chars: int = 60) -> list[str]:
     return chunks or [text]
 
 
-def _join(wavs, sr, pause: float = 0.35):
-    gap = np.zeros(int(pause * sr), dtype=np.float32)
-    out = []
-    for i, w in enumerate(wavs):
-        out += [np.asarray(w, dtype=np.float32)] + ([gap] if i < len(wavs) - 1 else [])
-    return np.concatenate(out)
+def _items(text: str, nat: dict, rng) -> list[tuple[str, str]]:
+    """読ませる文のかたまり [(文, 終わりの記号)]。間を自然にするときは 1 文ずつ（間を文ごとに決めるため）。"""
+    from studio import natural
+
+    text = apply_dict(text)
+    items = natural.split_sentences(text) if nat.get("pauses") else [(c, "") for c in split_text(text)]
+    return natural.add_fillers(items, float(nat.get("filler", 0)), rng)
 
 
-def speak(voice: str, text: str, checkpoint: str | None, instruct: str = "", sub: str = "tts") -> tuple[Path, str]:
-    """学習済みなら学習した声で、未学習なら参照音声からのクローンで読み上げる。
-    読み方辞書を当て、文ごとに区切って読ませてから、自然な間でつなぐ。"""
-    import soundfile as sf
-
+def _generate(voice: str, items, checkpoint: str | None, instruct: str = "", sub: str = "tts"):
+    """文ごとに読み上げる（_lock の中で呼ぶ）。戻り値: (音声のリスト, サンプリング周波数, 説明)"""
     from tts import fetch_model
 
     vdir = VOICES / voice
-    chunks = split_text(apply_dict(text))
+    wavs = []
+    if checkpoint:
+        model = _load(("ft", voice, sub, checkpoint), vdir / sub / checkpoint)
+        for c, _ in items:
+            # 公式の学習コードは言語指定なし（Auto）の形式で学習するので、読み上げ時も Auto にそろえる。
+            # "Japanese" を指定すると学習時と違う先頭トークンになり、話し終わらない・雑音になる
+            w, sr = model.generate_custom_voice(text=c, language="Auto", speaker=SPEAKER,
+                                                instruct=instruct or None, max_new_tokens=_max_tokens(c))
+            wavs.append(w[0])
+        return wavs, sr, f"学習済みモデル {checkpoint}"
+    if not (vdir / "ref.wav").exists():
+        raise RuntimeError("まだ学習データの準備（または学習）をしていません")
+    model = _load(("base",), fetch_model("Qwen/Qwen3-TTS-12Hz-1.7B-Base"))
+    ref_text = (vdir / "ref.txt").read_text(encoding="utf-8")
+    for c, _ in items:
+        w, sr = model.generate_voice_clone(text=c, language="Japanese", ref_audio=str(vdir / "ref.wav"),
+                                           ref_text=ref_text, max_new_tokens=_max_tokens(c))
+        wavs.append(w[0])
+    return wavs, sr, "未学習（参照音声からのクローン）"
+
+
+def _check_natural(voice: str, nat: dict) -> None:
+    from studio import natural
+    from studio.speakers import require_consent
+
+    for name in natural.needs_consent(nat):
+        require_consent(voice, name)
+
+
+def speak(voice: str, text: str, checkpoint: str | None, instruct: str = "", sub: str = "tts",
+          nat: dict | None = None, seed: int | None = None) -> tuple[Path, str]:
+    """学習済みなら学習した声で、未学習なら参照音声からのクローンで読み上げる。
+    読み方辞書を当て、文ごとに区切って読ませてから間を入れてつなぐ。
+
+    nat: 自然さの設定（studio/natural.py）。省略すると以前と同じ（決まった間・速さそのまま）。
+    息継ぎ・文末の脱力は声変換のあとにかけるので、ここではなく finish_natural で入れる。"""
+    import soundfile as sf
+
+    from studio import natural
+
+    nat = {**natural.OFF, **(nat or {})}
+    _check_natural(voice, nat)
+    rng = np.random.default_rng(seed)
+    items = _items(text, nat, rng)
     with _lock:
         t0 = time.time()
-        wavs = []
-        if checkpoint:
-            model = _load(("ft", voice, sub, checkpoint), vdir / sub / checkpoint)
-            for c in chunks:
-                # 公式の学習コードは言語指定なし（Auto）の形式で学習するので、読み上げ時も Auto にそろえる。
-                # "Japanese" を指定すると学習時と違う先頭トークンになり、話し終わらない・雑音になる
-                w, sr = model.generate_custom_voice(text=c, language="Auto", speaker=SPEAKER,
-                                                    instruct=instruct or None, max_new_tokens=_max_tokens(c))
-                wavs.append(w[0])
-            how = f"学習済みモデル {checkpoint}"
-        else:
-            if not (vdir / "ref.wav").exists():
-                raise RuntimeError("まだ学習データの準備（または学習）をしていません")
-            model = _load(("base",), fetch_model("Qwen/Qwen3-TTS-12Hz-1.7B-Base"))
-            ref_text = (vdir / "ref.txt").read_text(encoding="utf-8")
-            for c in chunks:
-                w, sr = model.generate_voice_clone(text=c, language="Japanese", ref_audio=str(vdir / "ref.wav"),
-                                                   ref_text=ref_text, max_new_tokens=_max_tokens(c))
-                wavs.append(w[0])
-            how = "未学習（参照音声からのクローン）"
+        wavs, sr, how = _generate(voice, items, checkpoint, instruct, sub)
         out = OUT / voice / f"tts_{time.strftime('%Y%m%d-%H%M%S')}.wav"
         out.parent.mkdir(parents=True, exist_ok=True)
-        sf.write(out, _join(wavs, sr), sr)
-    return out, f"{how} / {len(chunks)} 文 / {time.time() - t0:.1f}秒"
+        sf.write(out, natural.assemble(wavs, [k for _, k in items], sr, nat, rng), sr)
+    return out, f"{how} / {len(items)} 文 / {time.time() - t0:.1f}秒"
+
+
+def finish_natural(voice: str, wav, nat: dict | None, seed: int | None = None) -> Path:
+    """息継ぎ・文末の脱力を入れる（声変換のあとにかける）。どちらもオフなら何もしない。"""
+    import soundfile as sf
+
+    from studio import natural
+
+    nat = nat or {}
+    if not (nat.get("breath") or nat.get("creak")):
+        return Path(wav)
+    _check_natural(voice, nat)
+    y, sr = sf.read(wav, dtype="float32")
+    if y.ndim > 1:
+        y = y.mean(axis=1)
+    out = Path(wav).with_name(Path(wav).stem + "_nat.wav")
+    sf.write(out, natural.post(y, sr, voice, nat, np.random.default_rng(seed)), sr)
+    return out
+
+
+def mos(paths) -> dict:
+    """自然さの自動採点（1〜5。studio/mos.py を .venv-sep で動かす）。{ファイル名: 点}"""
+    import json
+
+    from studio.common import SEP_PY
+
+    with tempfile.TemporaryDirectory() as tmp:
+        res = Path(tmp) / "mos.json"
+        subprocess.run([str(SEP_PY), "-m", "studio.mos", *[str(Path(p).resolve()) for p in paths], "-o", str(res)],
+                       cwd=ROOT, env=child_env(), check=True, capture_output=True,
+                       creationflags=subprocess.CREATE_NO_WINDOW)
+        return json.loads(res.read_text(encoding="utf-8"))
+
+
+def speak_variants(voice: str, text: str, checkpoint: str | None, nats: list[dict], chain_vc: bool = True,
+                   name: str = "ab") -> list[Path]:
+    """聞き比べ用。同じ文・同じ読み上げ結果から、自然さの設定だけを変えた音声を作る。
+    （言いよどみの有無が違うときだけ、文が変わるので読み上げ直す）"""
+    import random
+
+    import soundfile as sf
+
+    from studio import natural
+    from studio.speakers import vc_model
+
+    nats = [{**natural.OFF, **n} for n in nats]
+    for n in nats:
+        _check_natural(voice, n)
+    seed = random.randrange(1 << 30)
+    gen, outs = {}, []
+    for i, nat in enumerate(nats):
+        key = (bool(nat["pauses"]), float(nat["filler"]))
+        if key not in gen:
+            items = _items(text, nat, np.random.default_rng(seed))
+            with _lock:
+                gen[key] = (_generate(voice, items, checkpoint), items)
+        (wavs, sr, _), items = gen[key]
+        raw = OUT / voice / f"{name}{i}_{time.strftime('%Y%m%d-%H%M%S')}.wav"
+        raw.parent.mkdir(parents=True, exist_ok=True)
+        sf.write(raw, natural.assemble(wavs, [k for _, k in items], sr, nat, np.random.default_rng(seed)), sr)
+        out = raw
+        if chain_vc and vc_model(voice):
+            out, _ = convert(voice, str(raw), name=f"{name}{i}vc")
+            raw.unlink(missing_ok=True)
+        outs.append(finish_natural(voice, out, nat, seed))
+    return outs
 
 
 EMOTIONS = {
@@ -211,28 +299,31 @@ EMOTIONS = {
 }
 
 
-def speak_emotion(voice: str, text: str, emotion: str) -> tuple[Path, str]:
+def speak_emotion(voice: str, text: str, emotion: str, nat: dict | None = None) -> tuple[Path, str]:
     """感情つき読み上げ。感情の指示が効く内蔵の声（Ono_Anna）で読ませてから、この話者の声に変換する。
-    本人の同意を記録した話者だけ使える。"""
+    本人の同意を記録した話者だけ使える。nat は自然さの設定（息継ぎ・文末の脱力は finish_natural で）。"""
     import soundfile as sf
 
+    from studio import natural
     from studio.speakers import require_consent
     from tts import fetch_model
 
     require_consent(voice, "感情つき読み上げ")
+    nat = {**natural.OFF, **(nat or {})}
     instruct = EMOTIONS.get(emotion, emotion)
-    chunks = split_text(apply_dict(text))
+    rng = np.random.default_rng()
+    items = _items(text, nat, rng)
     with _lock:
         t0 = time.time()
         model = _load(("custom",), fetch_model("Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"))
         wavs = []
-        for c in chunks:
+        for c, _ in items:
             w, sr = model.generate_custom_voice(text=c, language="Japanese", speaker="Ono_Anna", instruct=instruct,
                                                 max_new_tokens=_max_tokens(c))
             wavs.append(w[0])
         tmp = OUT / voice / f"emo_src_{time.strftime('%Y%m%d-%H%M%S')}.wav"
         tmp.parent.mkdir(parents=True, exist_ok=True)
-        sf.write(tmp, _join(wavs, sr), sr)
+        sf.write(tmp, natural.assemble(wavs, [k for _, k in items], sr, nat, rng), sr)
         t1 = time.time() - t0
     out, info = convert(voice, str(tmp), name="emo")
     tmp.unlink(missing_ok=True)

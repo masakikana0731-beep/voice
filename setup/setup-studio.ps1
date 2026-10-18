@@ -39,6 +39,13 @@ $py12 = Get-ChildItem "$PWD\.python\cpython-3.12.*-windows-x86_64-none\python.ex
 Invoke-Checked uv venv --allow-existing --python $py12 .venv-sep
 Invoke-Checked uv pip install --python .\.venv-sep\Scripts\python.exe torch==2.11.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu128
 Invoke-Checked uv pip install --python .\.venv-sep\Scripts\python.exe "audio-separator[gpu]" audioread speechbrain scikit-learn yt-dlp hf_xet
+# 自然さの自動採点（UTMOSv2）。重みは wget で取りに行く作りなので、ここで先に置いておく
+Invoke-Checked uv pip install --python .\.venv-sep\Scripts\python.exe "git+https://github.com/sarulab-speech/UTMOSv2.git"
+$mosDir = "$env:USERPROFILE\.cache\utmosv2\models\fusion_stage3"
+if (-not (Test-Path "$mosDir\fold0_s42_best_model.pth")) {
+    New-Item -ItemType Directory -Force $mosDir | Out-Null
+    curl.exe -L --retry 5 -o "$mosDir\fold0_s42_best_model.pth" https://huggingface.co/sarulab-speech/UTMOSv2/resolve/main/fold0_s42_best_model.pth
+}
 # yt-dlp が YouTube を読むのに JavaScript 実行環境（deno）が要る
 if (-not (Get-Command deno -ErrorAction SilentlyContinue)) {
     winget install --id DenoLand.Deno -e --source winget --accept-package-agreements --accept-source-agreements --disable-interactivity

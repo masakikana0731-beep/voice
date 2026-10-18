@@ -37,6 +37,15 @@ def main() -> int:
 
     if "prep" not in args.skip and run_logged([PY, "-m", "studio.prep", args.voice, "--purity", args.purity], log) != 0:
         return fail("データ準備")
+    if "prep" not in args.skip:
+        # 読み上げの「息継ぎ」に使う、本物の息の音を素材から取り出しておく（失敗しても学習は続ける）
+        try:
+            from studio.natural import extract_breaths
+
+            write_status(vdir, breaths=extract_breaths(args.voice))
+        except Exception as e:
+            with open(log, "a", encoding="utf-8") as f:
+                f.write(f"[breaths] 息の音の取り出しに失敗: {e}\n")
 
     if "tts" not in args.skip:
         cmd = [PY, "-m", "studio.train_tts", args.voice, "--size", args.size, "--epochs", args.tts_epochs,
@@ -82,13 +91,16 @@ def main() -> int:
             from studio.vc_eval import score
 
             write_status(vdir, stage="vc", message="新しいモデルと前のモデルを比べています")
-            new_s, old_s = score(args.voice, vdir / "vc"), score(args.voice, prev)
-            if old_s > new_s + 0.01:
+            (new_s, new_m), (old_s, old_m) = score(args.voice, vdir / "vc", True), score(args.voice, prev, True)
+            # 似ている度で比べる。差が 0.01 以内（同じくらい）のときだけ、自然さ（AI の採点）で決める
+            both = new_m is not None and old_m is not None
+            nat = f"、自然さ 前 {old_m} / 新 {new_m}" if both else ""
+            if old_s > new_s + 0.01 or (both and abs(old_s - new_s) <= 0.01 and old_m > new_m + 0.2):
                 shutil.rmtree(vdir / "vc")
                 shutil.copytree(prev, vdir / "vc")
-                msg = f"前のモデルのほうが良かったので戻しました（似ている度 前 {old_s} / 新 {new_s}）"
+                msg = f"前のモデルのほうが良かったので戻しました（似ている度 前 {old_s} / 新 {new_s}{nat}）"
             else:
-                msg = f"新しいモデルを使います（似ている度 前 {old_s} / 新 {new_s}）"
+                msg = f"新しいモデルを使います（似ている度 前 {old_s} / 新 {new_s}{nat}）"
             write_status(vdir, vc_compare=msg)
             with open(log, "a", encoding="utf-8") as f:
                 f.write(f"[vc_eval] {msg}\n")

@@ -17,7 +17,7 @@ from pathlib import Path
 
 import gradio as gr
 
-from studio import engine, post, style
+from studio import engine, natural, post, style
 from studio import speakers as spk
 from studio.common import AUDIO_EXT, PY, ROOT, SEP_PY, VIDEO_EXT, VOICES, child_env, ffmpeg, read_status, voice_dir, write_status
 
@@ -449,27 +449,227 @@ def do_batch(sid, files, *fx):
     return "".join(buttons) + f"<p>{len(files)} 本（{time.time() - t0:.0f}秒）</p>"
 
 
-def do_speak(sid, text, emotion, chain_vc, ckpt, instruct, *fx):
+def _nat(pauses, speed, breath, filler, creak) -> dict:
+    return {"pauses": bool(pauses), "speed": round(float(speed), 2), "breath": int(breath), "filler": int(filler),
+            "creak": int(creak)}
+
+
+def _nat_label(nat) -> str:
+    parts = (["間"] if nat["pauses"] else []) + ([f"速さ{nat['speed']:.2f}倍"] if nat["speed"] != 1.0 else [])
+    parts += [f"{natural.CONSENT_KEYS[k]}{nat[k]}" for k in natural.CONSENT_KEYS if nat[k]]
+    return "・".join(parts) or "なし"
+
+
+def do_speak(sid, text, emotion, chain_vc, ckpt, instruct, pauses, speed, breath, filler, creak, *fx):
     if not sid:
         raise gr.Error("話者を選んでください")
     if not text.strip():
         raise gr.Error("読ませる文章を入れてください")
+    nat = _nat(pauses, speed, breath, filler, creak)
+    for name in natural.needs_consent(nat):
+        _need_consent(sid, name)
+    natural.save_settings(sid, **nat)  # 次に開いたとき・チャットでの作成でも同じ設定を使う
     _busy_warning()
     try:
         if emotion and emotion != "なし":
             _need_consent(sid, "感情つき読み上げ")
-            out, info = engine.speak_emotion(sid, text, emotion)
+            out, info = engine.speak_emotion(sid, text, emotion, nat)
         else:
-            out, info = engine.speak(sid, text, None if (ckpt or "（").startswith("（") else ckpt, instruct)
+            out, info = engine.speak(sid, text, None if (ckpt or "（").startswith("（") else ckpt, instruct, nat=nat)
             if chain_vc and spk.vc_model(sid):
                 # 読み上げた音声に声変換をもう一度かけて、声を話者に近づける（似ている度 0.64 → 0.77 の実測）
                 out, info2 = engine.convert(sid, str(out), name="tts_vc")
                 info += f" → 声変換で仕上げ（{info2}）"
+        out = engine.finish_natural(sid, out, nat)  # 息継ぎ・文末の脱力は声変換のあとに入れる
+        info += f" / 自然さ: {_nat_label(nat)}"
     except gr.Error:
         raise
     except Exception as e:
         raise gr.Error(str(e))
     return (*finish(str(out), *fx), info, str(out))
+
+
+# ---------------------------------------------------------------- 自然さ（設定・息の音・AI の採点）
+
+def nat_values(sid):
+    st = natural.settings(sid) if sid else natural.DEFAULTS
+    return st["pauses"], st["speed"], st["breath"], st["filler"], st["creak"]
+
+
+def breath_view(sid):
+    n, preview = natural.breath_info(sid) if sid else (0, None)
+    md = (f"息の音: **{n} 個**（下で試聴できます。変な音が混ざっていたら教えてください）" if n
+          else "息の音: まだ取り出していません（右のボタンで取り出せます。1分ほど）")
+    return md, (str(preview) if preview else None)
+
+
+def do_extract_breaths(sid):
+    if not sid:
+        raise gr.Error("話者を選んでください")
+    try:
+        n = natural.extract_breaths(sid)
+    except Exception as e:
+        raise gr.Error(f"息の音を取り出せませんでした: {e}")
+    gr.Info(f"息の音を {n} 個取り出しました")
+    return breath_view(sid)
+
+
+def do_mos(sid, path):
+    """結果の自然さを AI で採点。比べやすいよう、本物の素材の点数（初回だけ測って保存）も出す。"""
+    if not path:
+        raise gr.Error("先に音声を作ってください")
+    ref_file = VOICES / sid / "ref_hq.wav" if sid else None
+    cache = VOICES / sid / "mos_ref.json" if sid else None
+    ref = json.loads(cache.read_text(encoding="utf-8")).get("mos") if cache and cache.exists() else None
+    files = [path] + ([ref_file] if ref is None and ref_file and ref_file.exists() else [])
+    try:
+        res = engine.mos(files)
+    except Exception as e:
+        raise gr.Error(f"採点できませんでした: {e}")
+    if ref is None and ref_file and ref_file.name in res:
+        ref = res[ref_file.name]
+        cache.write_text(json.dumps({"mos": ref}), encoding="utf-8")
+    v = res[Path(path).name]
+    return (f"📏 自然さ（AI の採点）: **{v:.2f}** / 5" + (f"　（本物の素材: {ref:.2f}）" if ref is not None else "")
+            + "　※英語中心で学習した AI なので、点数そのものより同じ文での比べっこに使ってください")
+
+
+# ---------------------------------------------------------------- 聞き比べ（どちらが自然か）
+
+AB_SAMPLES = [
+    "今日はとってもいい天気ですね。こんな日は、どこかに出かけたくなります。",
+    "最近ハマっているのは、朝のお散歩です。ちょっと早起きするだけで、一日が長く感じるんですよ。",
+    "このあいだ、久しぶりに映画を観に行きました。最後のシーンで、思わず泣いちゃいました。",
+    "みなさんは、寝る前に何をしていますか？わたしは、温かいお茶を飲むのが好きです。",
+    "それでは、今日はこのへんで。また来週も、聴いてくださいね。",
+]
+AB_NAMES = {"pauses": "間を自然にする", "speed": "話す速さ", "breath": "息継ぎ", "filler": "話し言葉", "creak": "文末の脱力"}
+
+
+def _ab_file(sid):
+    return VOICES / sid / "ab.json"
+
+
+def _ab_votes(sid) -> list:
+    try:
+        return json.loads(_ab_file(sid).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+
+
+def _ab_value(dim, v) -> str:
+    if dim == "pauses":
+        return "オン" if v else "オフ"
+    if dim == "speed":
+        return f"{float(v):.2f}倍"
+    return f"{v}" if v else "オフ"
+
+
+def ab_make(sid, text, ckpt, chain_vc, pauses, speed, breath, filler, creak):
+    """今の設定（基準）と、設定を 1 つだけ変えたものを作り、A/B をくじで決めて並べる。"""
+    import random
+
+    if not sid:
+        raise gr.Error("話者を選んでください")
+    base = _nat(pauses, speed, breath, filler, creak)
+    for name in natural.needs_consent(base):
+        _need_consent(sid, name)
+    dims = ["pauses", "speed"]
+    if spk.consent(sid):  # 息継ぎ・話し言葉・文末の脱力は同意の記録がある話者だけ
+        dims += ["filler", "creak"] + (["breath"] if natural.breath_info(sid)[0] else [])
+    # まだ比べた回数が少ない項目から選ぶ
+    counts = {d: sum(1 for v in _ab_votes(sid) if v["dim"] == d) for d in dims}
+    dim = random.choice([d for d in dims if counts[d] == min(counts.values())])
+    other = dict(base)
+    if dim == "pauses":
+        other["pauses"] = not base["pauses"]
+    elif dim == "speed":
+        cands = [round(base["speed"] + d, 2) for d in (-0.1, 0.1) if 0.85 <= base["speed"] + d <= 1.25]
+        other["speed"] = random.choice(cands)
+    else:
+        other[dim] = 0 if base[dim] else 50
+    pair = [base, other]
+    random.shuffle(pair)
+    for f in (OUTPUTS / sid).glob("ab*.wav"):  # 前回の聞き比べの音は消す
+        f.unlink(missing_ok=True)
+    text = (text or "").strip() or random.choice(AB_SAMPLES)
+    _busy_warning()
+    try:
+        a, b = engine.speak_variants(sid, text, None if (ckpt or "（").startswith("（") else ckpt, pair,
+                                     chain_vc=bool(chain_vc))
+    except PermissionError as e:
+        raise gr.Error(str(e))
+    except Exception as e:
+        raise gr.Error(f"作れませんでした: {e}")
+    state = {"dim": dim, "a": pair[0][dim], "b": pair[1][dim], "files": [str(a), str(b)], "text": text}
+    return str(a), str(b), "A と B を聞いて、**自然なほう**を選んでください（何が違うかは選んだあとに出ます）", state
+
+
+def ab_vote(sid, state, choice):
+    if not sid or not state or state.get("voted"):
+        raise gr.Error("先に「2つ作る」を押してください")
+    votes = _ab_votes(sid)
+    votes.append({"time": time.strftime("%Y-%m-%d %H:%M"), "dim": state["dim"], "a": state["a"], "b": state["b"],
+                  "choice": choice, "text": state["text"]})
+    _ab_file(sid).write_text(json.dumps(votes, ensure_ascii=False, indent=1), encoding="utf-8")
+    name, d = AB_NAMES[state["dim"]], state["dim"]
+    picked = {"a": "A", "b": "B", "same": "どちらとも言えない"}[choice]
+    md = (f"違い: **{name}**　A = {_ab_value(d, state['a'])} / B = {_ab_value(d, state['b'])}"
+          f"　→ あなたの答え: **{picked}**")
+    return md, {**state, "voted": True}, ab_tally(sid)
+
+
+def ab_ai(state):
+    if not state:
+        raise gr.Error("先に「2つ作る」を押してください")
+    try:
+        r = engine.mos(state["files"])
+    except Exception as e:
+        raise gr.Error(f"採点できませんでした: {e}")
+    a, b = (r[Path(f).name] for f in state["files"])
+    return f"🤖 AI の採点: A **{a:.2f}** / B **{b:.2f}**（5 点満点。AI の好みと人の耳は違うことがあります）"
+
+
+def _ab_stats(sid) -> dict:
+    """{項目: {値: [選ばれた回数, 出た回数]}}。「どちらとも言えない」は両方に 0.5。"""
+    stats = {}
+    for v in _ab_votes(sid):
+        st = stats.setdefault(v["dim"], {})
+        for side in ("a", "b"):
+            row = st.setdefault(json.dumps(v[side]), [0.0, 0])
+            row[1] += 1
+            row[0] += 1.0 if v["choice"] == side else (0.5 if v["choice"] == "same" else 0.0)
+    return stats
+
+
+def ab_tally(sid):
+    stats = _ab_stats(sid) if sid else {}
+    if not stats:
+        return "まだ聞き比べの結果はありません"
+    lines = ["| 項目 | 設定 | 選ばれた割合 |", "| --- | --- | --- |"]
+    for dim, st in stats.items():
+        for key, (w, n) in sorted(st.items()):
+            lines.append(f"| {AB_NAMES[dim]} | {_ab_value(dim, json.loads(key))} | {w / n:.0%}（{n} 回中）|")
+    return "\n".join(lines)
+
+
+def ab_apply(sid):
+    """3 回以上比べて、6 割以上選ばれた設定を、読み上げの初期設定にする。"""
+    if not sid:
+        raise gr.Error("話者を選んでください")
+    changed = {}
+    for dim, st in _ab_stats(sid).items():
+        best = max(((json.loads(k), w / n) for k, (w, n) in st.items() if n >= 3), key=lambda x: x[1], default=None)
+        if best and best[1] >= 0.6:
+            changed[dim] = best[0]
+    if not changed:
+        gr.Info("まだ決め手になる結果がありません（各項目 3 回以上・6 割以上で反映します）")
+        return nat_values(sid)
+    for name in natural.needs_consent(changed):
+        _need_consent(sid, name)
+    natural.save_settings(sid, **changed)
+    gr.Info("読み上げの初期設定にしました: " + "、".join(f"{AB_NAMES[k]} {_ab_value(k, v)}" for k, v in changed.items()))
+    return nat_values(sid)
 
 
 def do_sing(sid, song, separate, semitone, accomp_db):
@@ -556,14 +756,15 @@ def start_tune(sid):
     with open(voice_dir(sid) / "tune.log", "w", encoding="utf-8") as log:
         subprocess.Popen([str(PY), "-m", "studio.vc_tune", sid], cwd=ROOT, env=child_env(), stdout=log,
                          stderr=subprocess.STDOUT, creationflags=DETACH)
-    return "⏳ 最適化を始めました（2分ほど）。終わると「この話者の状態」に結果が出ます"
+    return "⏳ 最適化を始めました（3分ほど。似ている度と自然さで選びます）。話者を選び直すと結果が出ます"
 
 
 def tune_md(sid):
     st = engine.vc_settings(sid) if sid else {}
     if not st:
         return "まだ最適化していません"
-    return (f"最適化済み（{st.get('tuned', '')}）: 似ている度 {st.get('baseline')} → **{st.get('score')}**"
+    nat = f"　自然さ（AI）{st['mos_baseline']} → {st['mos']}" if st.get("mos") is not None else ""
+    return (f"最適化済み（{st.get('tuned', '')}）: 似ている度 {st.get('baseline')} → **{st.get('score')}**{nat}"
             f"（参照音声 {st.get('ref')} / 寄せ具合 {st.get('cfg')}）")
 
 
@@ -602,7 +803,10 @@ def result_area():
     out = gr.Audio(label="結果", type="filepath")
     save = gr.HTML()
     info = gr.Markdown(elem_classes="muted")
-    return out, save, info, gr.State(None)
+    with gr.Row():
+        mos_btn = gr.Button("📏 自然さを AI で採点（20秒ほど）", size="sm", scale=0, min_width=220)
+        mos_md = gr.Markdown()
+    return out, save, info, gr.State(None), mos_btn, mos_md
 
 
 # ---------------------------------------------------------------- 画面
@@ -641,7 +845,7 @@ with gr.Blocks(title="Voice Studio") as demo:
                             elem_classes="muted")
                 src = gr.Audio(sources=["microphone", "upload"], type="filepath", label="自分の録音（マイク or ファイル）")
                 conv_btn = gr.Button("🎙 変換する", variant="primary", elem_classes="big")
-                conv_out, conv_file, conv_info, conv_raw = result_area()
+                conv_out, conv_file, conv_info, conv_raw, conv_mos_btn, conv_mos = result_area()
                 conv_fx, conv_redo = finish_controls()
                 with gr.Accordion("⚙ 詳しい設定", open=False):
                     auto_pitch = gr.Checkbox(True, label="声の高さを話者に合わせる（男女差があるときはオン）")
@@ -662,8 +866,27 @@ with gr.Blocks(title="Voice Studio") as demo:
                     emotion = gr.Dropdown(EMO_CHOICES, value="なし", label="感情（同意の記録がある話者のみ）", scale=2)
                     chain_vc = gr.Checkbox(True, label="声変換で仕上げる（声がより似る・おすすめ）", scale=2)
                 speak_btn = gr.Button("📝 読み上げる", variant="primary", elem_classes="big")
-                speak_out, speak_file, speak_info, speak_raw = result_area()
+                speak_out, speak_file, speak_info, speak_raw, speak_mos_btn, speak_mos = result_area()
                 speak_fx, speak_redo = finish_controls()
+                with gr.Accordion("🌿 自然さ（間・速さ・息継ぎ・話し言葉）", open=False):
+                    gr.Markdown("人の声らしく聞こえるための工夫です（研究で効果が確かめられているものから順）。"
+                                "どれが良いかは「👂 聞き比べ」タブで、耳で決められます。", elem_classes="muted")
+                    nat_pauses = gr.Checkbox(True, label="間を自然にする（段落・句読点ごとに間の長さを変え、少しゆらぎを入れる）")
+                    nat_speed = gr.Slider(0.85, 1.25, value=1.0, step=0.05,
+                                          label="話す速さ（倍）。研究では、少し速めのほうが自然に聞こえやすい")
+                    gr.Markdown("**ここから下は、同意の記録がある話者のみ**（本人の息の音や話し方の癖で、より本人らしくなるため）",
+                                elem_classes="muted")
+                    nat_breath = gr.Slider(0, 100, value=0, step=10,
+                                           label="息継ぎ（本人の素材から取り出した息の音を文の頭に入れる。0 でオフ）")
+                    nat_filler = gr.Slider(0, 100, value=0, step=10,
+                                           label="話し言葉（「えっと」「あの」を時々入れる。逆効果のこともあります。0 でオフ）")
+                    nat_creak = gr.Slider(0, 100, value=0, step=10,
+                                          label="文末の脱力（文の終わりを少しかすれさせる。試験的。0 でオフ）")
+                    with gr.Row():
+                        breath_md = gr.Markdown()
+                        breath_btn = gr.Button("息の音を素材から取り出し直す", scale=0, min_width=220)
+                    breath_audio = gr.Audio(label="取り出した息の音（試聴）", type="filepath")
+                nat_fx = [nat_pauses, nat_speed, nat_breath, nat_filler, nat_creak]
                 with gr.Accordion("📖 読み方辞書（名前や専門用語の読みを登録）", open=False):
                     gr.Markdown("左に書き方、右に読み方（ひらがな・カタカナ）。全部の話者で使われます。", elem_classes="muted")
                     dict_df = gr.Dataframe(dict_rows(), headers=["書き方", "読み方"], col_count=(2, "fixed"),
@@ -676,6 +899,28 @@ with gr.Blocks(title="Voice Studio") as demo:
                     instruct = gr.Textbox(label="話し方の指示（感情「なし」のときだけ。学習済みモデルでは効かないことがあります）",
                                           placeholder="例: 嬉しそうに")
 
+            # ---- 👂 聞き比べ
+            with gr.Tab("👂 聞き比べ"):
+                gr.Markdown("同じ文を、**自然さの設定を 1 つだけ変えて** 2 通り作ります。どちらがどの設定かは隠してあるので、"
+                            "聞いて**自然なほう**を選んでください。回数がたまったら、選ばれた設定を読み上げの初期設定にできます。"
+                            "（読み上げタブの「声変換で仕上げる」「読み上げモデル」の設定を使います）", elem_classes="muted")
+                ab_text = gr.Textbox(label="読ませる文章（空なら例文から選びます）", lines=2)
+                ab_btn = gr.Button("👂 2つ作る", variant="primary", elem_classes="big")
+                ab_msg = gr.Markdown()
+                with gr.Row():
+                    ab_a = gr.Audio(label="A", type="filepath")
+                    ab_b = gr.Audio(label="B", type="filepath")
+                with gr.Row():
+                    vote_a = gr.Button("A のほうが自然")
+                    vote_same = gr.Button("どちらとも言えない")
+                    vote_b = gr.Button("B のほうが自然")
+                ab_ai_btn = gr.Button("🤖 AI にも採点させる（20秒ほど）", size="sm")
+                ab_ai_md = gr.Markdown()
+                with gr.Accordion("📊 これまでの結果", open=False):
+                    ab_tally_md = gr.Markdown()
+                    ab_apply_btn = gr.Button("選ばれた設定を、読み上げの初期設定にする（各 3 回以上・6 割以上のもの）")
+                ab_state = gr.State(None)
+
             # ---- 🎵 歌声
             with gr.Tab("🎵 歌声"):
                 gr.Markdown("曲（または自分で歌った録音）の**歌声をこの話者の声に**変えます。メロディはそのまま。"
@@ -686,7 +931,7 @@ with gr.Blocks(title="Voice Studio") as demo:
                     sing_semitone = gr.Slider(-12, 12, value=0, step=1, label="高さ（半音）。男性の歌→女性の声なら +12 など")
                     accomp_db = gr.Slider(-12, 6, value=0, step=1, label="伴奏の音量（dB）")
                 sing_btn = gr.Button("🎵 歌声を変換する", variant="primary", elem_classes="big")
-                sing_out, sing_file, sing_info, _sing_raw = result_area()
+                sing_out, sing_file, sing_info, _sing_raw, sing_mos_btn, sing_mos = result_area()
 
             # ---- 🕘 履歴
             with gr.Tab("🕘 履歴"):
@@ -807,9 +1052,10 @@ with gr.Blocks(title="Voice Studio") as demo:
     def _after_select(sid):
         """話者が変わったら、話者ごとの欄（同意・最適化・履歴）を入れ替え、声変換のモデルを先読みする。"""
         warm(sid)
-        return (*consent_values(sid), tune_md(sid), history_choices(sid))
+        return (*consent_values(sid), tune_md(sid), history_choices(sid), *nat_values(sid), *breath_view(sid),
+                ab_tally(sid))
 
-    after_outputs = consent_outputs + [tune_info, hist]
+    after_outputs = consent_outputs + [tune_info, hist] + nat_fx + [breath_md, breath_audio, ab_tally_md]
     gallery.select(on_gallery, None, [cur, target, use_col, add_col, add_title, new_fields, save_btn, raw_info,
                                       title, ckpt, set_name]).then(_after_select, cur, after_outputs)
     grow_btn.click(show_add, cur, add_outputs)
@@ -841,7 +1087,7 @@ with gr.Blocks(title="Voice Studio") as demo:
                    [conv_out, conv_file, conv_info, conv_raw]).then(history_choices, cur, hist)
     conv_redo.click(finish, [conv_raw] + conv_fx, [conv_out, conv_file])
     batch_btn.click(do_batch, [cur, batch_files] + conv_fx, batch_out).then(history_choices, cur, hist)
-    speak_btn.click(do_speak, [cur, text, emotion, chain_vc, ckpt, instruct] + speak_fx,
+    speak_btn.click(do_speak, [cur, text, emotion, chain_vc, ckpt, instruct] + nat_fx + speak_fx,
                     [speak_out, speak_file, speak_info, speak_raw]).then(history_choices, cur, hist)
     speak_redo.click(finish, [speak_raw] + speak_fx, [speak_out, speak_file])
     sing_btn.click(do_sing, [cur, song, separate, sing_semitone, accomp_db],
@@ -849,6 +1095,16 @@ with gr.Blocks(title="Voice Studio") as demo:
     hist_reload.click(history_choices, cur, hist)
     hist.change(history_pick, hist, [hist_audio, hist_save])
     dict_btn.click(dict_save, dict_df, dict_df)
+    for b, md, res in ((conv_mos_btn, conv_mos, conv_out), (speak_mos_btn, speak_mos, speak_out),
+                       (sing_mos_btn, sing_mos, sing_out)):
+        b.click(do_mos, [cur, res], md)
+    breath_btn.click(do_extract_breaths, cur, [breath_md, breath_audio])
+    ab_btn.click(lambda: "", None, ab_ai_md).then(
+        ab_make, [cur, ab_text, ckpt, chain_vc] + nat_fx, [ab_a, ab_b, ab_msg, ab_state])
+    for b, choice in ((vote_a, "a"), (vote_b, "b"), (vote_same, "same")):
+        b.click(lambda sid, st, c=choice: ab_vote(sid, st, c), [cur, ab_state], [ab_msg, ab_state, ab_tally_md])
+    ab_ai_btn.click(ab_ai, ab_state, ab_ai_md)
+    ab_apply_btn.click(ab_apply, cur, nat_fx)
     reload_ckpt.click(ckpt_choices, cur, ckpt)
     live_btn.click(open_live)
 

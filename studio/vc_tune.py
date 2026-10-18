@@ -3,7 +3,8 @@
   python -m studio.vc_tune <話者>   → voices/<話者>/vc_settings.json
 
 決まったテスト音声（assets/vc_eval_source.wav）を、参照音声の候補 × 寄せ具合（cfg）の組み合わせで変換し、
-登録済みの声にいちばん似たものを選ぶ。参照音声の候補は、素材の中から「話者らしさ」の高いクリップで作る。
+登録済みの声にいちばん似たもの（似ている度の差が 0.02 以内なら、AI の採点で自然なもの）を選ぶ。
+参照音声の候補は、素材の中から「話者らしさ」の高いクリップで作る。
 """
 
 import argparse
@@ -23,6 +24,7 @@ from studio.vc_eval import EVAL_SOURCE
 
 CFGS = [0.5, 0.7, 0.9]
 N_REFS = 4
+SIM_TIE = 0.02  # 似ている度がこの差以内なら「同じくらい」とみなし、自然さで選ぶ
 
 
 def purity(paths, refs, out_json, mode="files"):
@@ -92,15 +94,27 @@ def main() -> int:
                 print(f"[tune] {r.name} cfg={cfg}", flush=True)
         engine.stop_vc_server()
         sims = purity([t[0] for t in trials], list((vdir / "raw").glob("*.wav")), tmp / "sim.json")
-    scored = sorted(((sims[f.name], r, cfg) for f, r, cfg in trials), key=lambda x: -x[0])
-    base = next(s for s, r, cfg in scored if r.name == "ref_vc.wav" and cfg == 0.7)
-    best_s, best_r, best_cfg = scored[0]
-    st = {"ref": best_r.name, "cfg": best_cfg, "steps": 50, "score": round(best_s, 3), "baseline": round(base, 3),
-          "tuned": time.strftime("%Y-%m-%d %H:%M")}
+        try:  # 自然さ（AI の採点 1〜5）。似ている度が同じくらいなら、自然なほうを選ぶ
+            moss = engine.mos([t[0] for t in trials])
+        except Exception as e:
+            print(f"[tune] 自然さの採点を飛ばしました: {e}", flush=True)
+            moss = {}
+    # 似ている度を最優先し、いちばん似ているものとの差が SIM_TIE 以内の中から、いちばん自然なものを選ぶ。
+    # （自然さを足し算で混ぜると、似ている度 0.79 → 0.74 の設定が選ばれた。声が離れるのは本末転倒なので）
+    rows = [(sims[f.name], moss.get(f.name), r, cfg) for f, r, cfg in trials]
+    top = max(s for s, _, _, _ in rows)
+    scored = sorted(rows, key=lambda x: (x[0] < top - SIM_TIE, -(x[1] or 0) if x[0] >= top - SIM_TIE else -x[0]))
+    base_s, base_m = next((s, m) for s, m, r, cfg in scored if r.name == "ref_vc.wav" and cfg == 0.7)
+    best_s, best_m, best_r, best_cfg = scored[0]
+    st = {"ref": best_r.name, "cfg": best_cfg, "steps": 50, "score": round(best_s, 3), "baseline": round(base_s, 3),
+          "mos": best_m, "mos_baseline": base_m, "tuned": time.strftime("%Y-%m-%d %H:%M")}
     (vdir / "vc_settings.json").write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
-    for s, r, cfg in scored:
-        print(f"[tune] {s:.3f}  {r.name}  cfg={cfg}", flush=True)
-    msg = f"声変換の設定を最適化しました（似ている度 {base:.2f} → {best_s:.2f}、{time.time() - t0:.0f}秒）"
+    for s, m, r, cfg in scored:
+        print(f"[tune] 似ている度 {s:.3f}  自然さ {m}  {r.name}  cfg={cfg}", flush=True)
+    msg = f"声変換の設定を最適化しました（似ている度 {base_s:.2f} → {best_s:.2f}"
+    if base_m is not None and best_m is not None:
+        msg += f"、自然さ {base_m:.2f} → {best_m:.2f}"
+    msg += f"、{time.time() - t0:.0f}秒）"
     write_status(vdir, message=msg)
     print(f"[tune] {msg}", flush=True)
     return 0

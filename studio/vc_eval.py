@@ -17,8 +17,9 @@ from studio.common import ROOT, SEEDVC, SEP_PY, VC_PY, VOICES, child_env
 EVAL_SOURCE = ROOT / "assets" / "vc_eval_source.wav"
 
 
-def score(sid: str, model_dir: Path) -> float:
-    """model_dir（ft_model.pth と設定）で EVAL_SOURCE を変換し、似ている度（0〜1）を返す。"""
+def score(sid: str, model_dir: Path, with_mos: bool = False):
+    """model_dir（ft_model.pth と設定）で EVAL_SOURCE を変換し、似ている度（0〜1）を返す。
+    with_mos=True なら (似ている度, 自然さ 1〜5) を返す（自然さの採点に失敗したら None）。"""
     import soundfile as sf
 
     from studio.engine import split_at_silence, vc_reference
@@ -46,7 +47,16 @@ def score(sid: str, model_dir: Path) -> float:
         sims = json.loads(res.read_text(encoding="utf-8"))
         # 区間の長さで重みをつけた平均
         w = [sf.info(f).duration for f in files]
-        return round(sum(sims[f.name] * d for f, d in zip(files, w)) / sum(w), 3)
+        sim = round(sum(sims[f.name] * d for f, d in zip(files, w)) / sum(w), 3)
+        if not with_mos:
+            return sim
+        try:
+            from studio.engine import mos
+
+            m = mos(files)
+            return sim, round(sum(m[f.name] * d for f, d in zip(files, w)) / sum(w), 3)
+        except Exception:
+            return sim, None
 
 
 def main() -> int:
@@ -55,9 +65,9 @@ def main() -> int:
     ap.add_argument("--compare", action="store_true", help="vc_prev（前のモデル）とも比べる")
     a = ap.parse_args()
     vdir = VOICES / a.voice
-    print(f"[vc_eval] 今のモデル: {score(a.voice, vdir / 'vc')}", flush=True)
+    print(f"[vc_eval] 今のモデル（似ている度, 自然さ）: {score(a.voice, vdir / 'vc', True)}", flush=True)
     if a.compare and (vdir / "vc_prev" / "ft_model.pth").exists():
-        print(f"[vc_eval] 前のモデル: {score(a.voice, vdir / 'vc_prev')}", flush=True)
+        print(f"[vc_eval] 前のモデル（似ている度, 自然さ）: {score(a.voice, vdir / 'vc_prev', True)}", flush=True)
     return 0
 
 

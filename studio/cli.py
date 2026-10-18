@@ -54,13 +54,17 @@ def main() -> int:
         if a.cmd == "convert":
             out, info = engine.convert(sid, a.input, semitone=a.semitone)
         elif a.cmd == "speak":
+            from studio import natural
+
+            nat = natural.settings(sid)  # 画面の読み上げで最後に使った自然さの設定（間・息継ぎなど）
             if a.emotion:
-                out, info = engine.speak_emotion(sid, a.text, a.emotion)
+                out, info = engine.speak_emotion(sid, a.text, a.emotion, nat)
             else:
                 ck = (engine.tts_checkpoints(sid) or [None])[0]
-                out, info = engine.speak(sid, a.text, ck)
+                out, info = engine.speak(sid, a.text, ck, nat=nat)
                 out, info2 = engine.convert(sid, str(out))  # 読み上げのあと声変換で声を近づける
                 info += f" → 声変換（{info2}）"
+            out = engine.finish_natural(sid, out, nat)
         else:
             out, info = engine.sing(sid, a.input, separate=not a.no_separate, semitone=a.semitone)
         if a.cmd != "sing":
