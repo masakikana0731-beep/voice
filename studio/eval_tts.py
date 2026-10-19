@@ -1,14 +1,14 @@
 """学習した読み上げモデル（各周のチェックポイント）が正しく読めているかを採点する。
 
-各チェックポイントで例文を読ませ、Whisper で書き起こして文字誤り率（CER）を出す。
-学習しすぎるとモデルが壊れて雑音や同じ音の繰り返しになるので、それを見つけて一番良い周を選ぶ。
+各チェックポイントで例文を読ませ、読み間違い（Whisper の書き起こし）・似ている度・自然さを測り、
+本物の録音を 100 とした総合点（studio/quality.py）で一番良い周を選ぶ。
+学習しすぎるとモデルが壊れて雑音や同じ音の繰り返しになるので、読み間違いが 5 割を超える周は使わない。
 
   python -m studio.eval_tts <声の名前>      → voices/<名前>/tts/eval.json と best.txt
 """
 
 import argparse
 import json
-import re
 import shutil
 
 from studio.common import VOICES, write_status
@@ -20,34 +20,13 @@ SENTENCES = [
 ]
 
 
-def norm(t: str) -> str:
-    t = re.sub(r"[\s、。，．,.!！?？「」『』…ー〜~]", "", t)
-    return t.replace("本当", "ほんとう").replace("嬉しい", "うれしい")
-
-
-def cer(ref: str, hyp: str) -> float:
-    r, h = norm(ref), norm(hyp)
-    d = list(range(len(h) + 1))
-    for i, a in enumerate(r, 1):
-        prev, d[0] = d[0], i
-        for j, b in enumerate(h, 1):
-            prev, d[j] = d[j], min(d[j] + 1, d[j - 1] + 1, prev + (a != b))
-    return d[-1] / max(len(r), 1)
-
-
 def main() -> int:
-    import librosa
-    import soundfile as sf
-    import torch
-    from transformers import pipeline
-
     from studio import engine
-    from tts import fetch_model
 
     ap = argparse.ArgumentParser()
     ap.add_argument("voice")
     ap.add_argument("--dir", default="tts", help="採点するフォルダ（voices/<名前>/ 以下）")
-    ap.add_argument("--sim", action="store_true", help="（テスト機能）声の近さも採点に入れる")
+    ap.add_argument("--sim", action="store_true", help="（互換用。いまは常に似ている度・自然さも測る）")
     args = ap.parse_args()
     vdir = VOICES / args.voice
     ckpts = [p.name for p in sorted((vdir / args.dir).glob("epoch-*"), reverse=True)]
@@ -61,45 +40,57 @@ def main() -> int:
         print(f"[eval] {ck} 生成完了", flush=True)
     engine.unload()
 
-    asr = pipeline("automatic-speech-recognition", model=fetch_model("openai/whisper-large-v3-turbo"),
-                   dtype=torch.float16, device="cuda:0")
+    from studio import quality
+
+    files = [f for fs in wavs.values() for f in fs]
+    hyps = dict(zip(map(str, files), quality.transcribe(files)))
+    quality.unload_asr()
     result = {}
-    for ck, files in wavs.items():
-        scores, texts = [], []
-        for ref, f in zip(SENTENCES, files):
-            y, sr = sf.read(f, dtype="float32")
-            hyp = asr({"raw": librosa.resample(y, orig_sr=sr, target_sr=16000), "sampling_rate": 16000},
-                      generate_kwargs={"language": "japanese"}, return_timestamps=True)["text"]
-            scores.append(min(cer(ref, hyp), 1.0))
-            texts.append(hyp)
-        result[ck] = {"cer": round(sum(scores) / len(scores), 3), "texts": texts}
+    for ck, fs in wavs.items():
+        texts = [hyps[str(f)] for f in fs]
+        result[ck] = {"cer": round(sum(quality.cer(r, h) for r, h in zip(SENTENCES, texts)) / len(fs), 3),
+                      "texts": texts}
         print(f"[eval] {ck} 文字誤り率 {result[ck]['cer']:.2f} | {texts[0][:30]}", flush=True)
 
-    if args.sim:
-        # （テスト機能）生成した声が登録済みの声にどれだけ近いか。読めていても別人の声なら減点する
-        import subprocess
+    # 似ている度と自然さも測り、本物の録音（素材のクリップ）を 100 とした総合点で選ぶ（studio/quality.py）。
+    # 読み間違いだけで選ぶと、読めていても声が離れた周を選んでしまう（ayumin: 近さ 0.44 の周があった）
+    import random
+    import shutil as _sh
+    import tempfile
+    from pathlib import Path
 
-        from studio.common import ROOT, SEP_PY, child_env
-
-        files = [str(f) for fs in wavs.values() for f in fs]
-        raws = [str(f) for f in (vdir / "raw").glob("*.wav")]
-        sj = vdir / args.dir / "sim.json"
-        subprocess.run([str(SEP_PY), "-m", "studio.purity", "files", *files, "--ref", *raws, "-o", str(sj)],
-                       cwd=ROOT, env=child_env(), check=True)
-        sims = json.loads(sj.read_text(encoding="utf-8"))
-        from pathlib import Path
-
-        for ck, fs in wavs.items():
-            sim = sum(sims[Path(f).name] for f in fs) / len(fs)
-            result[ck]["sim"] = round(sim, 3)
-            # 誤り率に、近さの不足分（0.75 を下回った分）を足して総合点にする（小さいほど良い）
-            result[ck]["score"] = round(result[ck]["cer"] + max(0.0, 0.75 - sim), 3)
-            print(f"[eval] {ck} 声の近さ {sim:.2f} / 総合 {result[ck]['score']:.2f}", flush=True)
+    use_total = True
+    try:
+        refs = sorted((vdir / "raw").glob("*.wav")) or sorted((vdir / "clips_hq").glob("*.wav"))
+        reals = sorted((vdir / "clips_hq").glob("*.wav"))
+        reals = random.Random(0).sample(reals, min(8, len(reals)))
+        with tempfile.TemporaryDirectory() as tmp:
+            named = {}
+            for ck, fs in wavs.items():  # 名前が重ならないよう「周__番号」にそろえる
+                for i, f in enumerate(fs):
+                    dst = Path(tmp) / f"{ck}__{i}.wav"
+                    _sh.copy(f, dst)
+                    named[dst.name] = ck
+            for i, f in enumerate(reals):
+                _sh.copy(f, Path(tmp) / f"real__{i}.wav")
+            j = quality.judge(sorted(Path(tmp).glob("*.wav")), refs)
+        real = [v for k, v in j.items() if k.startswith("real__")]
+        base = {"cer": 0.03, "sim": quality.mean(real, "sim"), "mos": quality.mean(real, "mos")}
+        for ck in wavs:
+            vals = [v for k, v in j.items() if named.get(k) == ck]
+            result[ck].update(sim=quality.mean(vals, "sim"), mos=quality.mean(vals, "mos"))
+            result[ck]["total"] = quality.total(result[ck], base)
+            print(f"[eval] {ck} 似ている度 {result[ck]['sim']} / 自然さ {result[ck]['mos']} / 総合 {result[ck]['total']}"
+                  f"（本物: 似ている度 {base['sim']} / 自然さ {base['mos']}）", flush=True)
+    except Exception as e:  # 採点役が動かなければ、読み間違いだけで選ぶ
+        print(f"[eval] 似ている度・自然さを測れませんでした（読み間違いだけで選びます）: {e}", flush=True)
+        use_total = False
 
     (vdir / args.dir / "eval.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     # 誤り率が同じくらいなら新しい（よく学習した）ほうを選ぶ
-    if args.sim:
-        best = min(result, key=lambda c: (result[c]["score"], ckpts.index(c)))
+    usable = [c for c in result if result[c]["cer"] <= 0.5]
+    if use_total and usable:
+        best = max(usable, key=lambda c: (result[c]["total"], -ckpts.index(c)))  # 同点なら新しい周
     else:
         best = min(result, key=lambda c: (round(result[c]["cer"], 1), ckpts.index(c)))  # ckpts は新しい順
     if result[best]["cer"] > 0.5:

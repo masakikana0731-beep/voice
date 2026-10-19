@@ -63,6 +63,14 @@ def write_status(vdir: Path, **kw) -> None:
             time.sleep(0.1)
 
 
+def train_defaults() -> dict:
+    """精度検証（python -m studio.bench adopt）で決まった学習の既定。{"tts": {...}, "vc": {"lr", "steps"}}"""
+    try:
+        return json.loads((ROOT / "studio" / "train_defaults.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
 def child_env() -> dict:
     env = os.environ.copy()
     env.update(PYTHONUTF8="1", PYTHONIOENCODING="utf-8", HF_HUB_DISABLE_SYMLINKS_WARNING="1",

@@ -19,7 +19,8 @@ import gradio as gr
 
 from studio import engine, natural, post, style
 from studio import speakers as spk
-from studio.common import AUDIO_EXT, PY, ROOT, SEP_PY, VIDEO_EXT, VOICES, child_env, ffmpeg, read_status, voice_dir, write_status
+from studio.common import (AUDIO_EXT, PY, ROOT, SEP_PY, VIDEO_EXT, VOICES, child_env, ffmpeg, read_status,
+                           train_defaults, voice_dir, write_status)
 
 OUTPUTS = (ROOT / "outputs").resolve()
 SEP_DIR = ROOT / "outputs" / "separated"
@@ -413,6 +414,77 @@ def finish(raw, preset, reverb, echo, ambience, lips, ai_clean=False):
 def _busy_warning():
     if any(_alive(read_status(VOICES / s).get("pid")) for s in spk.list_ids()):
         gr.Warning("学習中です。変換も学習も遅くなります")
+    elif bench_running():
+        gr.Warning("精度検証の実行中です（GPU を使うので遅くなります）")
+
+
+# ---------------------------------------------------------------- 精度検証（studio/bench.py）
+
+def bench_running() -> bool:
+    from studio import bench
+
+    st = bench.state()
+    return bool(st.get("running")) and _alive(st.get("pid"))
+
+
+def bench_view():
+    """精度検証の状態・要約・グラフ・表。"""
+    from studio import bench
+
+    st, s = bench.state(), bench.summary()
+    lines = [("⏳ **実行中**: " if bench_running() else "停止中: ") + st.get("message", "まだ始めていません")
+             + (f"（{st['updated'][5:16]}）" if st.get("updated") else "")]
+    for kind, name in (("tts", "読み上げ"), ("vc", "声変換")):
+        z, b = s.get(f"{kind}_zero"), s.get(f"{kind}_best")
+        if b:
+            lines.append(f"{name}（素材 24 分）: 学習なし {z['total'] if z else '-'} 点 → 一番良い設定 **{b['total']} 点**"
+                         f"（本物の録音 = 100）")
+    d = train_defaults()
+    if d.get("from"):
+        t = d.get("tts", {})
+        lines.append(f"いまの学習の既定: {d['from']} の結果（読み上げ 学習率 {t.get('lr')}・{t.get('epochs')} 周"
+                     + (f" / 声変換 学習率 {d['vc']['lr']}・{d['vc']['steps']} ステップ" if d.get("vc") else "") + "）")
+    rep = bench.BENCH / "report.md"
+    png = bench.BENCH / "report.png"
+    return ("\n\n".join(lines), str(png) if png.exists() else None,
+            rep.read_text(encoding="utf-8") if rep.exists() else "")
+
+
+def bench_start():
+    from studio import bench
+
+    if bench_running():
+        raise gr.Error("すでに実行中です")
+    if any(_alive(read_status(VOICES / s).get("pid")) for s in spk.list_ids()):
+        raise gr.Error("学習中は始められません（GPU が足りなくなるため）")
+    engine.unload()
+    bench.LOGS.mkdir(parents=True, exist_ok=True)
+    with open(bench.LOGS / "run.log", "a", encoding="utf-8") as log:
+        subprocess.Popen([str(PY), "-m", "studio.bench", "run"], cwd=ROOT, env=child_env(), stdout=log,
+                         stderr=subprocess.STDOUT, creationflags=DETACH)
+    gr.Info("精度検証を始めました（全部で 9〜10 時間。画面を閉じても続きます）")
+    return bench_view()
+
+
+def bench_stop():
+    from studio import bench
+
+    pid = bench.state().get("pid")
+    if _alive(pid):
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+    bench.state(running=False, message="止めました（次に始めると続きから）")
+    return bench_view()
+
+
+def bench_adopt():
+    from studio import bench
+
+    try:
+        d = bench.adopt()
+    except SystemExit as e:
+        raise gr.Error(str(e))
+    gr.Info(f"これからの学習の既定にしました（読み上げ 学習率 {d['tts']['lr']}・{d['tts']['epochs']} 周）")
+    return bench_view()
 
 
 def _need_consent(sid, what):
@@ -1019,8 +1091,8 @@ with gr.Blocks(title="Voice Studio") as demo:
                     "終わったら前のモデルと比べて良いほうを自動で残します。", elem_classes="muted")
         with gr.Accordion("⚙ 学習の設定", open=False):
             size = gr.Radio(["1.7B", "0.6B"], value="1.7B", label="読み上げモデルの大きさ（メモリ不足なら 0.6B）")
-            tts_epochs = gr.Slider(1, 20, value=3, step=1, label="文章読み上げの学習回数（周）。各周を自動で採点して一番良いものを使います")
-            vc_steps = gr.Slider(500, 20000, value=3000, step=500, label="声変換の学習ステップ数")
+            tts_epochs = gr.Slider(1, 20, value=max(2, int(train_defaults().get("tts", {}).get("epochs", 3))), step=1, label="文章読み上げの学習回数（周）。各周を自動で採点して一番良いものを使います")
+            vc_steps = gr.Slider(500, 20000, value=int(train_defaults().get("vc", {}).get("steps", 3000)), step=500, label="声変換の学習ステップ数")
             do_tts = gr.Checkbox(True, label="文章読み上げを学習する")
             do_vc = gr.Checkbox(True, label="声変換（とリアルタイム用）を学習する")
         with gr.Group(visible=test_mode()) as t1:
@@ -1043,6 +1115,16 @@ with gr.Blocks(title="Voice Studio") as demo:
             clean_btn = gr.Button("整理する")
         disk_info = gr.Markdown(disk_usage())
         test_sw = gr.Checkbox(test_mode(), label="🧪 テストモード（試験中の機能を表示する）")
+        gr.Markdown("**📈 精度検証**（無料の公開コーパス JSUT で、学習率・学習の量・プログラムの変更・素材の量を自動で比べ、"
+                    "本物の録音を 100 点として採点します。全部で 9〜10 時間。その間は変換や学習が遅くなります）")
+        bench_md = gr.Markdown()
+        with gr.Row():
+            bench_start_btn = gr.Button("検証を始める（止めても続きから）")
+            bench_stop_btn = gr.Button("止める", variant="stop")
+            bench_adopt_btn = gr.Button("一番良い設定を、これからの学習の既定にする")
+        bench_img = gr.Image(label="結果のグラフ", type="filepath", interactive=False, height=300)
+        with gr.Accordion("結果の表（詳しく）", open=False):
+            bench_report = gr.Markdown()
 
     # ================================================================ 動き
     use_outputs = [cur, target, use_col, add_col, title, ckpt, set_name, set_icon]
@@ -1109,6 +1191,11 @@ with gr.Blocks(title="Voice Studio") as demo:
     live_btn.click(open_live)
 
     test_sw.change(set_test_mode, test_sw, [t1])
+    bench_outputs = [bench_md, bench_img, bench_report]
+    bench_start_btn.click(bench_start, None, bench_outputs)
+    bench_stop_btn.click(bench_stop, None, bench_outputs)
+    bench_adopt_btn.click(bench_adopt, None, bench_outputs)
+    gr.Timer(60).tick(bench_view, None, bench_outputs)
     clean_btn.click(cleanup_separated, clean_days, disk_info)
 
     def _on_load(sid):
@@ -1117,6 +1204,7 @@ with gr.Blocks(title="Voice Studio") as demo:
                 (i["name"] if i else ""), speaker_title(sid), *_after_select(sid))
 
     demo.load(_on_load, cur, [gallery, ckpt, sep_job, set_name, title] + after_outputs)
+    demo.load(bench_view, None, bench_outputs)
 
 
 if __name__ == "__main__":

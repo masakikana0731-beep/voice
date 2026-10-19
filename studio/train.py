@@ -9,15 +9,16 @@ import argparse
 import os
 import re
 
-from studio.common import PY, ROOT, SEEDVC, VC_CONFIG, VC_PY, VOICES, run_logged, write_status
+from studio.common import PY, ROOT, SEEDVC, VC_CONFIG, VC_PY, VOICES, run_logged, train_defaults, write_status
 
 
 def main() -> int:
+    d = train_defaults()  # 精度検証で決まった既定（なければ下の値）
     ap = argparse.ArgumentParser()
     ap.add_argument("voice")
     ap.add_argument("--size", default="1.7B")
-    ap.add_argument("--tts-epochs", type=int, default=3)
-    ap.add_argument("--vc-steps", type=int, default=3000)
+    ap.add_argument("--tts-epochs", type=int, default=max(2, int(d.get("tts", {}).get("epochs", 3))))
+    ap.add_argument("--vc-steps", type=int, default=int(d.get("vc", {}).get("steps", 3000)))
     ap.add_argument("--vc-batch", type=int, default=1, help="12GB の GPU では 1（2 だとメモリがあふれて極端に遅くなる）")
     ap.add_argument("--vc-continue", action="store_true",
                     help="声変換を、前回できあがったモデル（vc/ft_model.pth）の続きから学習する（延長・素材追加の再学習）")
@@ -76,7 +77,12 @@ def main() -> int:
             for old in (SEEDVC / "runs" / args.voice).glob("DiT_epoch_*.pth"):
                 old.unlink()
             cmd += ["--pretrained-ckpt", vdir / "vc" / "ft_model.pth"]
-        if run_logged(cmd, log, cwd=SEEDVC, on_line=progress) != 0:
+        vc_lr = d.get("vc", {}).get("lr")
+        if vc_lr:  # 精度検証で決まった学習率（studio/vc_run.py が差し替える）。リアルタイム用には使わない
+            os.environ["SEEDVC_LR"] = str(vc_lr)
+        rc = run_logged(cmd, log, cwd=SEEDVC, on_line=progress)
+        os.environ.pop("SEEDVC_LR", None)
+        if rc != 0:
             return fail("声変換の学習")
         from studio.speakers import keep_vc_model
 

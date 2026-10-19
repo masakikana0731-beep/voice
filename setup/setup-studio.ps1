@@ -9,7 +9,7 @@ $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
 function Invoke-Checked { & $args[0] $args[1..($args.Count - 1)]; if ($LASTEXITCODE) { throw "失敗: $args" } }
 
 # 学習用の追加ライブラリ（メモリ節約の 8bit 最適化など）
-Invoke-Checked uv pip install --python .\.venv\Scripts\python.exe bitsandbytes tensorboard
+Invoke-Checked uv pip install --python .\.venv\Scripts\python.exe bitsandbytes tensorboard pykakasi matplotlib
 
 # ffmpeg（スマホ録音 m4a やブラウザ録音の読み込み用）
 if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {

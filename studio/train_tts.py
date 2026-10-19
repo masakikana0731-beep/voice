@@ -7,6 +7,10 @@
   - VRAM 節約: テキスト埋め込みを凍結、8bit AdamW、勾配チェックポイント
   - チェックポイントはベースモデルの重みをコピーせず、最新 N 個だけ残す
   - 進捗を status.json に書く
+  - 精度検証（studio/bench.py）用の切り替え: 学習率の変え方（一定 / ウォームアップ＋コサイン）、
+    話者の特徴を全クリップの平均にする、サブ損失の重み、まとめる量（勾配累積）
+
+既定値は studio/train_defaults.json（精度検証で一番良かった設定。なければ下の値）。
 
   python -m studio.train_tts <声の名前> --epochs 10
 """
@@ -76,6 +80,33 @@ def save_checkpoint(model, base_path, out_dir, spk_embedding):
     save_file(state, str(out_dir / "model.safetensors"))
 
 
+DEFAULTS_FILE = Path(__file__).resolve().parent / "train_defaults.json"
+# 2026-10-15 時点の既定（ayumin で決めたもの）。精度検証の結果があればそちらを使う
+BUILTIN = {"lr": 2e-6, "epochs": 3, "grad_accum": 4, "schedule": "const", "spk_avg": 0, "sub_weight": 0.3}
+
+
+def tts_defaults() -> dict:
+    try:
+        saved = json.loads(DEFAULTS_FILE.read_text(encoding="utf-8")).get("tts", {})
+    except (OSError, ValueError):
+        saved = {}
+    return {**BUILTIN, **{k: v for k, v in saved.items() if k in BUILTIN}}
+
+
+@torch.no_grad()
+def mean_speaker_embedding(model, dataset, data, n: int = 64):
+    """話者の特徴を、クリップ（最大 n 本）それぞれから取って平均する。参照音声 1 本より声の特徴が安定する。"""
+    import librosa
+
+    embs = []
+    step = max(1, len(data) // n)
+    for item in data[::step][:n]:
+        wav, _ = librosa.load(item["audio"], sr=24000, mono=True)
+        mel = dataset.extract_mels(audio=wav.astype("float32"), sr=24000)
+        embs.append(model.speaker_encoder(mel.to(model.device).to(model.dtype)).float())
+    return torch.cat(embs).mean(dim=0, keepdim=True)
+
+
 def main() -> int:
     from accelerate import Accelerator
     from dataset import TTSDataset
@@ -84,12 +115,19 @@ def main() -> int:
 
     from tts import fetch_model
 
+    d = tts_defaults()
     ap = argparse.ArgumentParser()
     ap.add_argument("voice")
     ap.add_argument("--size", choices=["0.6B", "1.7B"], default="1.7B")
-    ap.add_argument("--epochs", type=int, default=3)
-    ap.add_argument("--lr", type=float, default=2e-6)  # 2e-5 だと数十ステップで壊れる（実測）
+    ap.add_argument("--epochs", type=int, default=d["epochs"])
+    ap.add_argument("--lr", type=float, default=d["lr"])
     ap.add_argument("--batch-size", type=int, default=2)
+    ap.add_argument("--grad-accum", type=int, default=d["grad_accum"], help="何バッチ分まとめて 1 回更新するか")
+    ap.add_argument("--schedule", choices=["const", "cosine"], default=d["schedule"],
+                    help="学習率の変え方。cosine = 最初の 1 割で徐々に上げ、あとは徐々に下げる")
+    ap.add_argument("--spk-avg", type=int, default=d["spk_avg"],
+                    help="1 なら、話者の特徴を参照音声 1 本ではなく全クリップ（最大 64 本）の平均にする")
+    ap.add_argument("--sub-weight", type=float, default=d["sub_weight"], help="細かい音（サブ）の損失の重み")
     ap.add_argument("--keep", type=int, default=2, help="残すチェックポイント数")
     ap.add_argument("--optim", choices=["adamw8bit", "adamw"], default="adamw8bit")
     ap.add_argument("--no-freeze", action="store_true", help="テキスト埋め込みも学習する（公式と同じ）")
@@ -103,7 +141,7 @@ def main() -> int:
 
     base = Path(fetch_model(f"Qwen/Qwen3-TTS-12Hz-{args.size}-Base"))
 
-    accelerator = Accelerator(gradient_accumulation_steps=4, mixed_precision="bf16")
+    accelerator = Accelerator(gradient_accumulation_steps=args.grad_accum, mixed_precision="bf16")
     qwen = Qwen3TTSModel.from_pretrained(str(base), torch_dtype=torch.bfloat16, attn_implementation="sdpa")
     config = AutoConfig.from_pretrained(str(base))
 
@@ -129,12 +167,29 @@ def main() -> int:
         optimizer = bnb.optim.AdamW8bit(params, lr=args.lr, weight_decay=0.01)
     else:
         optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.01)
-    print(f"[tts] size={args.size} optim={args.optim} freeze={not args.no_freeze} gc={not args.no_gc} lr={args.lr}", flush=True)
+    print(f"[tts] size={args.size} optim={args.optim} freeze={not args.no_freeze} gc={not args.no_gc} lr={args.lr} "
+          f"schedule={args.schedule} grad_accum={args.grad_accum} spk_avg={args.spk_avg} sub_weight={args.sub_weight}",
+          flush=True)
+
+    fixed_spk = None
+    if args.spk_avg:
+        model.to("cuda:0")
+        fixed_spk = mean_speaker_embedding(model, dataset, data).to(torch.bfloat16)
+        print(f"[tts] 話者の特徴を {min(64, len(data))} クリップの平均にしました", flush=True)
+
+    total_steps = args.epochs * len(loader)
+    scheduler = None
+    if args.schedule == "cosine":
+        from transformers import get_cosine_schedule_with_warmup
+
+        updates = max(1, total_steps // args.grad_accum)
+        scheduler = get_cosine_schedule_with_warmup(optimizer, max(1, updates // 10), updates)
 
     model, optimizer, loader = accelerator.prepare(model, optimizer, loader)
+    if scheduler is not None:
+        scheduler = accelerator.prepare(scheduler)
     model.train()
-    spk_embedding = None
-    total_steps = args.epochs * len(loader)
+    spk_embedding = fixed_spk
     t0 = time.time()
     done = 0
 
@@ -147,7 +202,11 @@ def main() -> int:
                 codec_emb_mask = batch["codec_embedding_mask"]
                 codec_mask = batch["codec_mask"]
 
-                speaker_embedding = model.speaker_encoder(batch["ref_mels"].to(model.device).to(model.dtype)).detach()
+                if fixed_spk is not None:
+                    speaker_embedding = fixed_spk.to(model.dtype).expand(input_ids.shape[0], -1)
+                else:
+                    speaker_embedding = model.speaker_encoder(
+                        batch["ref_mels"].to(model.device).to(model.dtype)).detach()
                 if spk_embedding is None:
                     spk_embedding = speaker_embedding
 
@@ -176,12 +235,14 @@ def main() -> int:
                 sub_logits, _ = model.talker.forward_sub_talker_finetune(sub_codes, hidden)  # 返る損失はずれているので使わない
                 sub_loss = F.cross_entropy(sub_logits.float().reshape(-1, sub_logits.shape[-1]),
                                            sub_codes[:, 1:].reshape(-1))
-                loss = talker_loss + 0.3 * sub_loss
+                loss = talker_loss + args.sub_weight * sub_loss
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(params, 1.0)
                 optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
                 optimizer.zero_grad()
 
             done += 1
