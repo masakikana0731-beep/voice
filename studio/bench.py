@@ -72,10 +72,21 @@ def state(**kw) -> dict:
 
 
 def results() -> list[dict]:
+    """結果の一覧。総合点は、保存した値ではなく、今の計算方法（quality.total）で毎回計算し直す。"""
+    from studio import quality
+
     try:
-        return [json.loads(l) for l in RESULTS.read_text(encoding="utf-8").splitlines() if l.strip()]
+        rows = [json.loads(l) for l in RESULTS.read_text(encoding="utf-8").splitlines() if l.strip()]
     except OSError:
         return []
+    base = next((r for r in rows if r["kind"] == "real"), None)
+    for r in rows:
+        if base and r.get("sim") is not None and r.get("cer") is not None:
+            r["total"] = quality.total(r, base)
+            # 似せ度: 声の似ている度だけを、別人 = 0%・本物 = 100% に直したもの
+            floor = base.get("sim_other", 0.35)
+            r["like"] = round(100 * max(0.0, min(1.2, (r["sim"] - floor) / (base["sim"] - floor))), 1)
+    return rows
 
 
 def add_result(row: dict) -> None:
@@ -332,6 +343,11 @@ def eval_real() -> None:
         shutil.copy(TEST / "real" / t["name"], f)
         files.append(f)
     m = score_sets({"real": files}, {t["name"]: t["text"] for t in test}, None)["real"]
+    # 別人の声（声変換の元にした内蔵の声 Ono_Anna）の似ている度 = 総合点で 0 点になる下限
+    from studio import quality
+
+    other = quality.judge(sorted((TEST / "vc_src").glob("*.wav")), sorted((TEST / "print").glob("*.wav")), mos=False)
+    m["sim_other"] = quality.mean(list(other.values()), "sim")
     add_result({"exp": "real", "kind": "real", "stage": "base", "data": 0, **m, "dur": 1.0})
 
 
@@ -349,6 +365,7 @@ def tts_exp(stage: str, data: int, p: dict, epochs: int = TTS_EPOCHS, note: str 
     voice, sub = f"_bench_d{data}", f"runs/{eid}"
     lg = LOGS / f"{eid}.log"
     log(f"読み上げ [{stage}] 素材 {data}分 / {note or eid} を学習中")
+    shutil.rmtree(VOICES / voice / sub, ignore_errors=True)  # 途中で止めた前回の分
     t0 = time.time()
     cmd = [PY, "-m", "studio.train_tts", voice, "--epochs", epochs, "--keep", epochs, "--out", sub,
            "--lr", p["lr"], "--schedule", p["schedule"], "--spk-avg", p["spk_avg"], "--sub-weight", p["sub_weight"],
@@ -465,10 +482,12 @@ def run_all() -> None:
 
 # ---------------------------------------------------------------- まとめ
 
-def _fmt(r, keys=("total", "sim", "mos", "cer")) -> str:
+def _fmt(r, keys=("total", "like", "sim", "mos", "cer")) -> str:
     def f(k):
         v = r.get(k)
-        return "-" if v is None else (f"{v:.0%}" if k == "cer" else (f"{v:.1f}" if k == "total" else f"{v:.3f}"))
+        if v is None:
+            return "-"
+        return {"cer": f"{v:.0%}", "total": f"{v:.1f}", "like": f"{v:.0f}%"}.get(k, f"{v:.3f}")
     return " | ".join(f(k) for k in keys)
 
 
@@ -492,11 +511,13 @@ def report() -> Path:
     BENCH.mkdir(exist_ok=True)
     L = ["# 精度検証の結果（JSUT・女性 1 名の読み上げ音声）", "",
          f"更新: {time.strftime('%Y-%m-%d %H:%M')}　状態: {state().get('message', '')}", "",
-         "総合点 = 本物の録音を 100 とした点（似ている度 5 割・自然さ 3 割・読み間違いの少なさ 2 割）。", ""]
+         "総合点 = 本物の録音を 100 とした点（似ている度 5 割・自然さ 3 割・読み間違いの少なさ 2 割。似ている度は別人の声を 0 とする）。", ""]
     if s["base"]:
         b = s["base"]
-        L += [f"本物の録音: 似ている度 {b['sim']:.3f} / 自然さ {b['mos']:.2f} / 読み間違い {b['cer']:.0%}（Whisper の誤差）", ""]
-    L += ["## 到達レベル（素材 24 分）", "", "| | 総合 | 似ている度 | 自然さ | 読み間違い | 設定 |", "|---|---|---|---|---|---|"]
+        L += [f"本物の録音（100 点）: 似ている度 {b['sim']:.3f} / 自然さ {b['mos']:.2f} / 読み間違い {b['cer']:.0%}（Whisper の誤差）",
+              "",
+              f"別人の声（似ている度の 0 点）: 似ている度 {b.get('sim_other', 0.35):.3f}", ""]
+    L += ["## 到達レベル（素材 24 分）", "", "| | 総合 | 似せ度 | 似ている度 | 自然さ | 読み間違い | 設定 |", "|---|---|---|---|---|---|---|"]
     for k, name in (("tts_zero", "読み上げ・学習なし"), ("tts_best", "読み上げ・一番良い設定"),
                     ("vc_zero", "声変換・学習なし"), ("vc_best", "声変換・一番良い設定")):
         r = s.get(k)
@@ -507,25 +528,26 @@ def report() -> Path:
             if k == "vc_best":
                 how = f"学習率 {r['params']['lr']:g}・{r['step']} ステップ"
             L.append(f"| {name} | {_fmt(r)} | {how} |")
-    L += ["", "## 読み上げ（周ごと）", "", "| 段階 | 素材 | 内容 | 周 | 総合 | 似ている度 | 自然さ | 読み間違い | 長さ | 学習(分) |",
-          "|---|---|---|---|---|---|---|---|---|---|"]
+    L += ["", "## 読み上げ（周ごと）", "", "| 段階 | 素材 | 内容 | 周 | 総合 | 似せ度 | 似ている度 | 自然さ | 読み間違い | 長さ | 学習(分) |",
+          "|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in rs:
         if r["kind"] == "tts":
             if r.get("failed"):
-                L.append(f"| {r['stage']} | {r['data']}分 | {r.get('note', '')} | - | ⚠ {r['failed']} | | | | | |")
+                L.append(f"| {r['stage']} | {r['data']}分 | {r.get('note', '')} | - | ⚠ {r['failed']} | | | | | | |")
                 continue
             L.append(f"| {r['stage']} | {r['data']}分 | {r.get('note', '')} | {r.get('epoch', '-')} | {_fmt(r)} | "
                      f"{r.get('dur', '-')} | {r.get('train_min', '-')} |")
-    L += ["", "## 声変換（ステップごと）", "", "| 段階 | 素材 | 学習率 | ステップ | 総合 | 似ている度 | 自然さ | 読み間違い | 学習(分) |",
-          "|---|---|---|---|---|---|---|---|---|"]
+    L += ["", "## 声変換（ステップごと）", "", "| 段階 | 素材 | 学習率 | ステップ | 総合 | 似せ度 | 似ている度 | 自然さ | 読み間違い | 学習(分) |",
+          "|---|---|---|---|---|---|---|---|---|---|"]
     for r in rs:
         if r["kind"] == "vc":
             lr = f"{r['params']['lr']:g}" if r.get("params") else "学習なし"
             if r.get("failed"):
-                L.append(f"| {r['stage']} | {r['data']}分 | {lr} | - | ⚠ {r['failed']} | | | | |")
+                L.append(f"| {r['stage']} | {r['data']}分 | {lr} | - | ⚠ {r['failed']} | | | | | |")
                 continue
             L.append(f"| {r['stage']} | {r['data']}分 | {lr} | {r.get('step', '-')} | {_fmt(r)} | {r.get('train_min', '-')} |")
-    L += ["", "「長さ」は本物と同じ文を読んだときの長さの比（1 = 本物と同じ速さ。大きいほどゆっくり）。",
+    L += ["", "「似せ度」は声の似ている度だけを、別人 = 0%・本物 = 100% に直したもの。",
+          "「長さ」は本物と同じ文を読んだときの長さの比（1 = 本物と同じ速さ。大きいほどゆっくり）。",
           "聞き比べ用の音声は bench/runs/<実験>/ にあります。"]
     out = BENCH / "report.md"
     out.write_text("\n".join(L), encoding="utf-8")

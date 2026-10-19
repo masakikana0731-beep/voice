@@ -438,7 +438,7 @@ def bench_view():
         z, b = s.get(f"{kind}_zero"), s.get(f"{kind}_best")
         if b:
             lines.append(f"{name}（素材 24 分）: 学習なし {z['total'] if z else '-'} 点 → 一番良い設定 **{b['total']} 点**"
-                         f"（本物の録音 = 100）")
+                         f"（本物の録音 = 100）／ 声の似せ度 {z.get('like', '-') if z else '-'}% → **{b.get('like')}%**")
     d = train_defaults()
     if d.get("from"):
         t = d.get("tts", {})

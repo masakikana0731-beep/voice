@@ -83,9 +83,15 @@ def judge(paths, refs, mos: bool = True) -> dict:
 
 def total(m: dict, base: dict) -> float:
     """本物の録音（base）を 100 とした総合点。似ている度 5 割・自然さ 3 割・読み間違いの少なさ 2 割。
-    読み間違いは本物より 30 ポイント多いと 0 点。"""
-    s = min(1.0, max(0.0, m["sim"]) / base["sim"])
-    q = min(1.0, m["mos"] / base["mos"]) if m.get("mos") is not None and base.get("mos") else s
+
+    似ている度は別人でも 0.3〜0.4 出るので、別人の声（base["sim_other"]、なければ 0.35）を 0、本物を満点にする。
+    自然さは 1（最低）を 0、本物を満点にする。読み間違いは本物より 30 ポイント多いと 0。"""
+    floor = base.get("sim_other", 0.35)
+    s = min(1.0, max(0.0, (m["sim"] - floor) / max(1e-6, base["sim"] - floor)))
+    if m.get("mos") is not None and base.get("mos"):
+        q = min(1.0, max(0.0, (m["mos"] - 1) / max(1e-6, base["mos"] - 1)))
+    else:
+        q = s
     c = max(0.0, 1 - max(0.0, m["cer"] - base["cer"]) / 0.3)
     return round(100 * (0.5 * s + 0.3 * q + 0.2 * c), 1)
 
