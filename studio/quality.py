@@ -71,8 +71,10 @@ def judge(paths, refs, mos: bool = True) -> dict:
     """似ている度と自然さ（studio/judge.py を .venv-sep で）。{ファイル名: {"sim", "mos"}}
     ファイル名が重なると上書きされるので、呼び出し側で名前を分けておく。"""
     with tempfile.TemporaryDirectory() as tmp:
-        res = Path(tmp) / "judge.json"
-        cmd = [str(SEP_PY), "-m", "studio.judge", *[str(Path(p).resolve()) for p in paths],
+        res, lst = Path(tmp) / "judge.json", Path(tmp) / "paths.txt"
+        # ファイルが多いとコマンドの長さの上限（約 3 万 2 千文字）を超えるので、一覧ファイルで渡す
+        lst.write_text("\n".join(str(Path(p).resolve()) for p in paths), encoding="utf-8")
+        cmd = [str(SEP_PY), "-m", "studio.judge", "--list", str(lst),
                "--ref", *[str(Path(r).resolve()) for r in refs], "-o", str(res)] + ([] if mos else ["--no-mos"])
         r = subprocess.run(cmd, cwd=ROOT, env=child_env(), capture_output=True, text=True, encoding="utf-8",
                            errors="replace", creationflags=subprocess.CREATE_NO_WINDOW)

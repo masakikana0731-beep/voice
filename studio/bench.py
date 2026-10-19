@@ -2,6 +2,7 @@
 
   python -m studio.bench run       # 準備から全部の実験まで順に実行（止めても、次回は続きから）
   python -m studio.bench report    # bench/report.md と bench/report.png を作り直す
+  python -m studio.bench rescore   # 保存してある音声を全部、今の採点役で採点し直す（採点の方法を変えたとき）
   python -m studio.bench adopt     # 一番良かった設定を学習の既定（studio/train_defaults.json）にする
 
 実験の流れ（前の結果を見て次を決める）:
@@ -476,6 +477,10 @@ def run_all() -> None:
     if vb:
         for d in (60, 120):
             vc_exp("素材の量", d, vb["params"]["lr"])
+    try:
+        rescore()  # 全部を同じ物差しで採点し直してから、まとめる
+    except Exception as e:  # 失敗しても、それまでの結果はそのまま使える
+        print(f"[bench] 採点し直しに失敗しました: {e}", flush=True)
     log("すべての実験が終わりました")
     state(running=False, finished=time.strftime("%Y-%m-%d %H:%M"))
 
@@ -597,6 +602,48 @@ def chart(rs) -> None:
     plt.close(fig)
 
 
+def rescore() -> None:
+    """保存してある全部の音声（bench/runs/）を、今の採点役でまとめて採点し直す（似ている度・自然さ）。
+    途中で採点の方法を変えたときに、実験どうしを同じ物差しで比べるため。読み間違いはそのまま。"""
+    from studio import quality
+
+    try:
+        rows = [json.loads(l) for l in RESULTS.read_text(encoding="utf-8").splitlines() if l.strip()]
+    except OSError:
+        return
+    files = sorted(RUNS.glob("*/*__*.wav"))
+    log(f"全部の音声（{len(files)} 本）を採点し直しています")
+    # 名前が重ならないよう「実験名__ラベル__番号」の一覧で渡し、結果は（実験, ラベル）ごとに平均する
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        links = []
+        for f in files:
+            dst = Path(tmp) / f"{f.parent.name}__{f.name}"
+            os.link(f, dst)
+            links.append(dst)
+        j = quality.judge(links, sorted((TEST / "print").glob("*.wav")))
+        other = quality.judge(sorted((TEST / "vc_src").glob("*.wav")), sorted((TEST / "print").glob("*.wav")),
+                              mos=False)
+    groups = {}
+    for name, v in j.items():
+        exp, label, _ = name.split("__")
+        groups.setdefault((exp, label), []).append(v)
+    for r in rows:
+        if r.get("sim") is None:
+            continue
+        label = ("real" if r["kind"] == "real" else "zero" if r["stage"] == "base"
+                 else f"epoch-{r['epoch']:03d}" if r["kind"] == "tts" else f"s{r['step']}")
+        vals = groups.get((r["exp"], label))
+        if vals:
+            r["sim"], r["mos"] = quality.mean(vals, "sim"), quality.mean(vals, "mos")
+        if r["kind"] == "real":
+            r["sim_other"] = quality.mean(list(other.values()), "sim")
+    shutil.copy(RESULTS, RESULTS.with_suffix(".before_rescore.jsonl"))
+    RESULTS.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    report()
+
+
 def adopt() -> dict:
     """一番良かった設定を、これからの学習の既定にする（studio/train_defaults.json）。"""
     s = summary()
@@ -617,7 +664,8 @@ def adopt() -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["run", "report", "adopt", "_prepare", "_eval-real", "_eval-tts", "_eval-vc"])
+    ap.add_argument("cmd", choices=["run", "report", "rescore", "adopt", "_prepare", "_eval-real", "_eval-tts",
+                                    "_eval-vc"])
     ap.add_argument("args", nargs="*")
     a = ap.parse_args()
     if a.cmd == "run":
@@ -628,6 +676,8 @@ def main() -> int:
                 state(running=False)
     elif a.cmd == "report":
         print(report())
+    elif a.cmd == "rescore":
+        rescore()
     elif a.cmd == "adopt":
         adopt()
     elif a.cmd == "_prepare":
