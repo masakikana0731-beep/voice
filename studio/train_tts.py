@@ -3,6 +3,8 @@
 公式 third_party/Qwen3-TTS/finetuning/sft_12hz.py をもとに、Windows + 12GB GPU 向けに変更:
   - 【不具合修正】テキスト埋め込みに text_projection を通す（公式は通しておらず、推論とずれて壊れる）
   - 【不具合修正】損失のラベルが二重にずれていたのを直す（公式＋transformers の自動シフトで 2 つ先を学習していた）
+  - 【不具合修正】細かい音（サブ）の予測を、推論と同じ位置の隠れ状態で学習する（公式は 1 つずれていて、
+    学習率を上げると崩れた。2026-10-19 の精度検証で発見）
   - flash-attn なし（sdpa）、文字コードは UTF-8 固定
   - VRAM 節約: テキスト埋め込みを凍結、8bit AdamW、勾配チェックポイント
   - チェックポイントはベースモデルの重みをコピーせず、最新 N 個だけ残す
@@ -128,6 +130,8 @@ def main() -> int:
     ap.add_argument("--spk-avg", type=int, default=d["spk_avg"],
                     help="1 なら、話者の特徴を参照音声 1 本ではなく全クリップ（最大 64 本）の平均にする")
     ap.add_argument("--sub-weight", type=float, default=d["sub_weight"], help="細かい音（サブ）の損失の重み")
+    ap.add_argument("--sub-align", choices=["next", "own"], default="next",
+                    help="サブの予測に使う隠れ状態の位置。next = 推論と同じ（修正版）、own = 公式と同じ（比較用）")
     ap.add_argument("--keep", type=int, default=2, help="残すチェックポイント数")
     ap.add_argument("--optim", choices=["adamw8bit", "adamw"], default="adamw8bit")
     ap.add_argument("--no-freeze", action="store_true", help="テキスト埋め込みも学習する（公式と同じ）")
@@ -168,7 +172,8 @@ def main() -> int:
     else:
         optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.01)
     print(f"[tts] size={args.size} optim={args.optim} freeze={not args.no_freeze} gc={not args.no_gc} lr={args.lr} "
-          f"schedule={args.schedule} grad_accum={args.grad_accum} spk_avg={args.spk_avg} sub_weight={args.sub_weight}",
+          f"schedule={args.schedule} grad_accum={args.grad_accum} spk_avg={args.spk_avg} sub_weight={args.sub_weight} "
+          f"sub_align={args.sub_align}",
           flush=True)
 
     fixed_spk = None
@@ -230,7 +235,12 @@ def main() -> int:
                 labels = batch["codec_0_labels"][:, 1:]
                 talker_loss = F.cross_entropy(out.logits.float().reshape(-1, out.logits.shape[-1]),
                                               labels.reshape(-1), ignore_index=-100)
-                hidden = out.hidden_states[0][-1][codec_mask[:, :-1]]
+                # 【不具合修正 2026-10-19・精度検証で発見】細かい音（サブ）の予測に使う隠れ状態の位置。
+                # 推論では「位置 p の隠れ状態（次のフレームの基本の音を予測したもの）」で次のフレームの細かい音を作る。
+                # 公式は codec_mask[:, :-1]（自分の入力フレームと組）で、入力に答えが入っているため写すことを覚えてしまい、
+                # 学習率を上げると読み上げが崩れた（1e-5 で 1 周目から読めない）。codec_mask[:, 1:] で 1 つ前の位置と組にする
+                align = codec_mask[:, 1:] if args.sub_align == "next" else codec_mask[:, :-1]
+                hidden = out.hidden_states[0][-1][align]
                 sub_codes = codec_ids[codec_mask]
                 sub_logits, _ = model.talker.forward_sub_talker_finetune(sub_codes, hidden)  # 返る損失はずれているので使わない
                 sub_loss = F.cross_entropy(sub_logits.float().reshape(-1, sub_logits.shape[-1]),

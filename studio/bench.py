@@ -8,6 +8,7 @@
 実験の流れ（前の結果を見て次を決める）:
   0. 基準: 本物の録音（= 100 点）、学習なし（参照音声からのクローン・汎用の声変換）
   1. 読み上げ: 学習率 5 通り（素材 24 分・4 周、周ごとに採点）。一番良いのが最後の周なら 8 周でも試す
+     （2026-10-19: サブの位置合わせの不具合をこの検証で見つけて直した。直す前の結果は「修正前」として残す）
   2. 読み上げ: プログラムの変更 4 通りを、一番良い学習率で 1 つずつ試す
      （ウォームアップ＋コサイン / 話者の特徴を全クリップの平均に / サブ損失の重み 1.0 / まとめる量 2 倍）
   3. 読み上げ: 良かった変更を全部入れたもの（2 つ以上あれば）
@@ -47,7 +48,7 @@ SIZES = [10, 24, 60, 120]          # 素材の量（分）
 N_TEST, N_PRINT, N_VC = 12, 30, 8  # 採点用の文の数・本物の声の特徴に使う数・声変換の元音声の数
 TTS_EPOCHS = 4
 LRS = [2e-6, 5e-6, 1e-5, 2e-5, 5e-5]
-P0 = {"lr": 2e-6, "schedule": "const", "spk_avg": 0, "sub_weight": 0.3, "grad_accum": 4}
+P0 = {"lr": 2e-6, "schedule": "const", "spk_avg": 0, "sub_weight": 0.3, "grad_accum": 4, "sub_align": "next"}
 VARIANTS = {  # 名前: (変更, 説明)
     "cosine": ({"schedule": "cosine"}, "学習率をウォームアップ＋コサインで変える"),
     "spk_avg": ({"spk_avg": 1}, "話者の特徴を全クリップの平均にする"),
@@ -355,8 +356,10 @@ def eval_real() -> None:
 # ---------------------------------------------------------------- 実験
 
 def tts_id(data: int, p: dict, epochs: int) -> str:
+    # サブの位置合わせを直す前（own）の実験は、名前に印を付けない（それまでの結果と同じ名前のまま）
+    fix = "_fix" if p.get("sub_align", "own") == "next" else ""
     return (f"tts_d{data}_lr{p['lr']:g}_{p['schedule']}_spk{p['spk_avg']}_sub{p['sub_weight']:g}"
-            f"_ga{p['grad_accum']}_e{epochs}")
+            f"_ga{p['grad_accum']}{fix}_e{epochs}")
 
 
 def tts_exp(stage: str, data: int, p: dict, epochs: int = TTS_EPOCHS, note: str = "") -> str:
@@ -370,7 +373,7 @@ def tts_exp(stage: str, data: int, p: dict, epochs: int = TTS_EPOCHS, note: str 
     t0 = time.time()
     cmd = [PY, "-m", "studio.train_tts", voice, "--epochs", epochs, "--keep", epochs, "--out", sub,
            "--lr", p["lr"], "--schedule", p["schedule"], "--spk-avg", p["spk_avg"], "--sub-weight", p["sub_weight"],
-           "--grad-accum", p["grad_accum"]]
+           "--grad-accum", p["grad_accum"], "--sub-align", p.get("sub_align", "own")]
     meta = {"kind": "tts", "stage": stage, "data": data, "params": p, "note": note}
     if run_logged(cmd, lg) != 0:
         add_result({**meta, "exp": eid, "failed": "学習に失敗", "total": None})
@@ -456,7 +459,8 @@ def run_all() -> None:
 
     # 2. プログラムの変更を 1 つずつ
     s2 = {name: tts_exp("変更", 24, {**p1, **ch}, epochs, note=desc) for name, (ch, desc) in VARIANTS.items()}
-    winners = [n for n, e in s2.items() if (best_row([e]) or {}).get("total", 0) > b1["total"] + 0.5]
+    # 同じ設定でも採点は ±1〜3 点ぶれる（修正前の 2e-6・4 周目が 83.0 と 84.0）ので、2 点以上の差だけを効果ありとみなす
+    winners = [n for n, e in s2.items() if (best_row([e]) or {}).get("total", 0) > b1["total"] + 2.0]
 
     # 3. 良かった変更を全部
     s3 = []
