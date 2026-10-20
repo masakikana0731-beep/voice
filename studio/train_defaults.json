@@ -1,0 +1,22 @@
+{
+ "tts": {
+  "lr": 1e-05,
+  "schedule": "const",
+  "spk_avg": 0,
+  "sub_weight": 0.3,
+  "grad_accum": 8,
+  "sub_align": "next",
+  "epochs": 3
+ },
+ "from": "精度検証 2026-10-21",
+ "level": {
+  "tts_total": 94.5,
+  "tts_zero_total": 84.0,
+  "vc_total": 78.1,
+  "vc_zero_total": 71.1
+ },
+ "vc": {
+  "lr": 1e-05,
+  "steps": 2000
+ }
+}
