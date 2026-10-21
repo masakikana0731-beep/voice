@@ -85,6 +85,9 @@ def unload() -> None:
     import torch
 
     stop_vc_server()
+    from studio import quality
+
+    quality.unload_asr()  # 読み上げの候補選びで読み込んだ Whisper も外す
     with _lock:
         _cache.update(key=None, model=None)
         gc.collect()
@@ -161,21 +164,76 @@ def _items(text: str, nat: dict, rng) -> list[tuple[str, str]]:
     return natural.add_fillers(items, float(nat.get("filler", 0)), rng)
 
 
-def _generate(voice: str, items, checkpoint: str | None, instruct: str = "", sub: str = "tts"):
-    """文ごとに読み上げる（_lock の中で呼ぶ）。戻り値: (音声のリスト, サンプリング周波数, 説明)"""
+# 読み上げを何個まとめて作って選ぶか。あゆみんで実測（studio/tts_lab.py、8 文）:
+#   1 個だけ 総合 88.7・読み間違い 13%（ときどき言葉を飛ばす・早口で崩れる）→ 4 個から選ぶ 総合 100・読み間違い 3%、
+#   似ている度 0.733 → 0.796。まとめて作るので時間はほぼ同じ（97 秒 → 105 秒）
+TTS_BEST_OF = 4
+TTS_CER_OK = 0.15  # 読み間違いがこれより多い候補は選ばない
+
+
+def _pick_tts(voice: str, items, cands, sr) -> list:
+    """かたまりごとに、読み間違いが少ないもののうち本人の声にいちばん似ている候補を選ぶ。"""
+    import soundfile as sf
+
+    from studio import quality
+
+    with tempfile.TemporaryDirectory() as tmp:
+        files, owner = [], []
+        for i, ws in enumerate(cands):
+            for k, w in enumerate(ws):
+                f = Path(tmp) / f"c{i:03d}__k{k}.wav"
+                sf.write(f, w, sr)
+                files.append(f)
+                owner.append((i, k))
+        try:
+            hyps = quality.transcribe(files)
+            vdir = VOICES / voice
+            refs = sorted((vdir / "raw").glob("*.wav")) or [vdir / "ref_hq.wav"]
+            j = quality.judge(files, refs, mos=False, print_cache=vdir / "voiceprint.npy")
+        except Exception as e:  # 採点できなければ 1 個目を使う
+            print(f"[speak] 選べませんでした（1 個目を使います）: {e}", flush=True)
+            return [ws[0] for ws in cands]
+    best = []
+    for i, ws in enumerate(cands):
+        want = len(quality.kana(items[i][0]))
+        # (読み間違い, 似ている度, 候補の番号, 余計な声の文字数)。余計な声 = 書き起こしが元の文より長い分。
+        # 学習した素材（ラジオ）のクセで、話し終わりに「はぁ」などを付けることがあるため
+        sc = [(quality.cer(items[i][0], hyps[n]), j[files[n].name]["sim"], k,
+               max(0, len(quality.kana(hyps[n])) - want)) for n, (ii, k) in enumerate(owner) if ii == i]
+        ok = [s for s in sc if s[0] <= TTS_CER_OK]
+        clean = [s for s in ok if s[3] <= 1] or ok
+        if clean:
+            # 正しく読めていることを最優先（一番少ない読み間違い +2% まで）、その中で一番似ているもの。
+            # 似ている度を先にすると「ラジオ」→「ダチョウ」のような読み間違いの候補を選ぶことがあった
+            least = min(s[0] for s in clean)
+            k = max((s for s in clean if s[0] <= least + 0.02), key=lambda s: s[1])[2]
+        else:
+            k = min(sc)[2]
+        best.append(ws[k])
+    return best
+
+
+def _generate(voice: str, items, checkpoint: str | None, instruct: str = "", sub: str = "tts", best_of: int = 1):
+    """文ごとに読み上げる（_lock の中で呼ぶ）。戻り値: (音声のリスト, サンプリング周波数, 説明)
+    best_of > 1 なら、学習済みモデルで同じかたまりを best_of 個まとめて作り、一番良いものを選ぶ。"""
     from tts import fetch_model
 
     vdir = VOICES / voice
     wavs = []
     if checkpoint:
         model = _load(("ft", voice, sub, checkpoint), vdir / sub / checkpoint)
+        n = max(1, int(best_of))
+        cands = []
         for c, _ in items:
             # 公式の学習コードは言語指定なし（Auto）の形式で学習するので、読み上げ時も Auto にそろえる。
             # "Japanese" を指定すると学習時と違う先頭トークンになり、話し終わらない・雑音になる
-            w, sr = model.generate_custom_voice(text=c, language="Auto", speaker=SPEAKER,
-                                                instruct=instruct or None, max_new_tokens=_max_tokens(c))
-            wavs.append(w[0])
-        return wavs, sr, f"学習済みモデル {checkpoint}"
+            w, sr = model.generate_custom_voice(text=[c] * n, language=["Auto"] * n, speaker=[SPEAKER] * n,
+                                                instruct=[instruct] * n if instruct else None,
+                                                max_new_tokens=_max_tokens(c))
+            cands.append(w)
+        if n > 1:
+            return _pick_tts(voice, items, cands, sr), sr, f"学習済みモデル {checkpoint}（{n} 個から選択）"
+        return [ws[0] for ws in cands], sr, f"学習済みモデル {checkpoint}"
     if not (vdir / "ref.wav").exists():
         raise RuntimeError("まだ学習データの準備（または学習）をしていません")
     model = _load(("base",), fetch_model("Qwen/Qwen3-TTS-12Hz-1.7B-Base"))
@@ -196,7 +254,7 @@ def _check_natural(voice: str, nat: dict) -> None:
 
 
 def speak(voice: str, text: str, checkpoint: str | None, instruct: str = "", sub: str = "tts",
-          nat: dict | None = None, seed: int | None = None) -> tuple[Path, str]:
+          nat: dict | None = None, seed: int | None = None, best_of: int = 1) -> tuple[Path, str]:
     """学習済みなら学習した声で、未学習なら参照音声からのクローンで読み上げる。
     読み方辞書を当て、文ごとに区切って読ませてから間を入れてつなぐ。
 
@@ -212,7 +270,7 @@ def speak(voice: str, text: str, checkpoint: str | None, instruct: str = "", sub
     items = _items(text, nat, rng)
     with _lock:
         t0 = time.time()
-        wavs, sr, how = _generate(voice, items, checkpoint, instruct, sub)
+        wavs, sr, how = _generate(voice, items, checkpoint, instruct, sub, best_of)
         out = OUT / voice / f"tts_{time.strftime('%Y%m%d-%H%M%S')}.wav"
         out.parent.mkdir(parents=True, exist_ok=True)
         sf.write(out, natural.assemble(wavs, [k for _, k in items], sr, nat, rng), sr)
@@ -272,7 +330,7 @@ def speak_variants(voice: str, text: str, checkpoint: str | None, nats: list[dic
         if key not in gen:
             items = _items(text, nat, np.random.default_rng(seed))
             with _lock:
-                gen[key] = (_generate(voice, items, checkpoint), items)
+                gen[key] = (_generate(voice, items, checkpoint, best_of=TTS_BEST_OF), items)
         (wavs, sr, _), items = gen[key]
         raw = OUT / voice / f"{name}{i}_{time.strftime('%Y%m%d-%H%M%S')}.wav"
         raw.parent.mkdir(parents=True, exist_ok=True)

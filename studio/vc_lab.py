@@ -45,6 +45,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("voice")
     ap.add_argument("--n", type=int, default=3, help="何回か変換して選ぶときの回数")
+    ap.add_argument("--only-n", action="store_true", help="回数の比べっこだけ（ステップ数・仕上げは試さない）")
     a = ap.parse_args()
     sid, vdir = a.voice, VOICES / a.voice
     test = json.loads((bench.TEST / "test.json").read_text(encoding="utf-8"))["vc"]
@@ -56,7 +57,7 @@ def main() -> int:
 
     # 1. 変換（ステップ数 3 通り。50 は n 回）
     runs = {}
-    for steps, times in ((30, 1), (50, a.n), (100, 1)):
+    for steps, times in ((50, a.n),) if a.only_n else ((30, 1), (50, a.n), (100, 1)):
         for k in range(times):
             d = work / f"s{steps}_{k}"
             convert_dir(sid, bench.TEST / "vc_src", d, steps)
@@ -66,7 +67,7 @@ def main() -> int:
 
     # 2. 仕上げ（50 ステップの 1 回目に対して）
     base = work / "s50_0"
-    for kind in ("clean", "polish", "clean_polish"):
+    for kind in () if a.only_n else ("clean", "polish", "clean_polish"):
         d = work / f"s50_0_{kind}"
         d.mkdir()
         for f in sorted(base.glob("*.wav")):
@@ -96,7 +97,7 @@ def main() -> int:
         for i, f in enumerate(reals):
             shutil.copy(f, Path(tmp) / f"real__{i}.wav")
         allf = files + [Path(tmp) / f"real__{i}.wav" for i in range(len(reals))]
-        j = quality.judge(allf, refs)
+        j = quality.judge(allf, refs, print_cache=vdir / "voiceprint.npy")
         hyps = dict(zip(map(str, files), quality.transcribe(files)))
     quality.unload_asr()
     real = [v for k, v in j.items() if k.startswith("real__")]
@@ -111,14 +112,12 @@ def main() -> int:
         m = {k: quality.mean(list(d.values()), k) for k in ("sim", "mos", "cer")}
         m["total"] = quality.total(m, basem)
         rows[label] = m
-    # 何回か変換して、文ごとに一番良いものを選んだ場合
-    pick = {}
-    for name in texts:
-        cands = [per[f"s50_{k}"][name] for k in range(a.n)]
-        pick[name] = max(cands, key=lambda v: quality.total(v, basem))
-    m = {k: quality.mean(list(pick.values()), k) for k in ("sim", "mos", "cer")}
-    m["total"] = quality.total(m, basem)
-    rows[f"s50_best_of_{a.n}"] = m
+    # 何回か変換して、文ごとに一番良いものを選んだ場合（本番と同じく似ている度だけで選ぶ）。2〜n 回を比べる
+    for n in range(2, a.n + 1):
+        pick = {name: max((per[f"s50_{k}"][name] for k in range(n)), key=lambda v: v["sim"]) for name in texts}
+        m = {k: quality.mean(list(pick.values()), k) for k in ("sim", "mos", "cer")}
+        m["total"] = quality.total(m, basem)
+        rows[f"s50_best_of_{n}"] = m
     out = {"base": basem, "rows": rows}
     (bench.BENCH / f"vc_lab_{sid}.json").write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"[lab] 本物: 似ている度 {basem['sim']} / 自然さ {basem['mos']}", flush=True)

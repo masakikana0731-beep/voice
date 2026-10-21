@@ -572,7 +572,8 @@ def do_speak(sid, text, emotion, chain_vc, ckpt, instruct, pauses, speed, breath
             _need_consent(sid, "感情つき読み上げ")
             out, info = engine.speak_emotion(sid, text, emotion, nat)
         else:
-            out, info = engine.speak(sid, text, None if (ckpt or "（").startswith("（") else ckpt, instruct, nat=nat)
+            out, info = engine.speak(sid, text, None if (ckpt or "（").startswith("（") else ckpt, instruct, nat=nat,
+                                     best_of=engine.TTS_BEST_OF)
             if chain_vc and spk.vc_model(sid):
                 # 読み上げた音声に声変換をもう一度かけて、声を話者に近づける（似ている度 0.64 → 0.77 の実測）
                 out, info2 = engine.convert(sid, str(out), name="tts_vc")

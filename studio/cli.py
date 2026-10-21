@@ -62,7 +62,7 @@ def main() -> int:
                 out, info = engine.speak_emotion(sid, a.text, a.emotion, nat)
             else:
                 ck = (engine.tts_checkpoints(sid) or [None])[0]
-                out, info = engine.speak(sid, a.text, ck, nat=nat)
+                out, info = engine.speak(sid, a.text, ck, nat=nat, best_of=engine.TTS_BEST_OF)
                 out, info2 = engine.convert(sid, str(out))  # 読み上げのあと声変換で声を近づける
                 info += f" → 声変換（{info2}）"
             out = engine.finish_natural(sid, out, nat)
