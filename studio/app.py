@@ -375,12 +375,28 @@ def stop_training(sid):
     return engine.status_text(sid)
 
 
-def refresh(sid):
+def refresh(sid, shown=None):
+    """5 秒ごと: 学習の状態とログ。前回と同じなら何も送らない。"""
     if not sid:
-        return "", ""
-    log = voice_dir(sid) / "train.log"
-    tail = "\n".join(log.read_text(encoding="utf-8", errors="replace").splitlines()[-12:]) if log.exists() else ""
-    return engine.status_text(sid), tail
+        out = ("", "")
+    else:
+        log = voice_dir(sid) / "train.log"
+        tail = "\n".join(log.read_text(encoding="utf-8", errors="replace").splitlines()[-12:]) if log.exists() else ""
+        out = (engine.status_text(sid), tail)
+    if shown == out:
+        return gr.skip(), gr.skip(), shown
+    return out[0], out[1], out
+
+
+def bench_tick(shown):
+    """60 秒ごと: 精度検証の表示。状態の更新日時もレポートも変わっていなければ何も送らない。"""
+    from studio import bench
+
+    rep = bench.BENCH / "report.md"
+    key = (bench.state().get("updated"), rep.stat().st_mtime if rep.exists() else None, bench_running())
+    if key == shown:
+        return gr.skip(), gr.skip(), gr.skip(), shown
+    return (*bench_view(), key)
 
 
 # ---------------------------------------------------------------- 声変換・読み上げ・歌声
@@ -1154,7 +1170,8 @@ with gr.Blocks(title="Voice Studio") as demo:
     job_outputs = [sep_info, sep_paths, sep_shown] + spk_outputs
     sep_btn.click(start_separate, [target, sep_files, sep_urls, dereverb, denoise, speakers], sep_job)
     sep_job.change(render_job, sep_job, job_outputs)
-    gr.Timer(5).tick(tick_job, [sep_job, sep_shown], job_outputs)
+    # 自動更新は「読み込み中」の点滅を出さない（スマホで 5 秒ごとに画面がちらついていた）
+    gr.Timer(5).tick(tick_job, [sep_job, sep_shown], job_outputs, show_progress="hidden")
     save_btn.click(save_material, [target, new_name, new_icon, sep_shown, sep_paths, uploads] + spk_check,
                    [target, cur, gallery, add_title, new_fields, save_btn, raw_info, uploads, title,
                     clean_box, clean_md, clean_state])
@@ -1166,7 +1183,8 @@ with gr.Blocks(title="Voice Studio") as demo:
                                      eval_sim],
                     status)
     stop_btn.click(stop_training, target, status)
-    gr.Timer(5).tick(refresh, target, [status, log])
+    train_shown = gr.State(None)
+    gr.Timer(5).tick(refresh, [target, train_shown], [status, log, train_shown], show_progress="hidden")
 
     conv_btn.click(do_convert, [cur, src, steps, auto_pitch, semitone] + conv_fx,
                    [conv_out, conv_file, conv_info, conv_raw]).then(history_choices, cur, hist)
@@ -1198,7 +1216,8 @@ with gr.Blocks(title="Voice Studio") as demo:
     bench_start_btn.click(bench_start, None, bench_outputs)
     bench_stop_btn.click(bench_stop, None, bench_outputs)
     bench_adopt_btn.click(bench_adopt, None, bench_outputs)
-    gr.Timer(60).tick(bench_view, None, bench_outputs)
+    bench_shown = gr.State(None)
+    gr.Timer(60).tick(bench_tick, bench_shown, bench_outputs + [bench_shown], show_progress="hidden")
     clean_btn.click(cleanup_separated, clean_days, disk_info)
 
     def _on_load(sid):
