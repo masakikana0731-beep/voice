@@ -430,18 +430,28 @@ def split_at_silence(y, sr, max_sec: float = 15.0):
         return [(0, len(y))]
     cuts = [0]
     seg_start = 0
-    for (s0, e0), (s1, _) in zip(iv[:-1], iv[1:]):
+    for (s0, e0), (s1, e1) in zip(iv[:-1], iv[1:]):
         mid = (e0 + s1) // 2  # 声と声のあいだ（無音）の真ん中
-        if s1 - seg_start > max_sec * sr and mid > seg_start:
+        # 次の声を入れると max_sec を超えるなら、ここ（無音の真ん中）で区切る。
+        # 【不具合修正】以前は「次の声の始まり」で判定していたので区切りが遅れて区間が max_sec を超え、
+        # 下の「仕方なく等分」で言葉の途中を切っていた（長めの文章の声変換が途切れて聞こえた）
+        if e1 - seg_start > max_sec * sr and mid > seg_start:
             cuts.append(mid)
             seg_start = mid
     cuts.append(len(y))
     out = []
+    hop = 512
+    rms = librosa.feature.rms(y=y, frame_length=2048, hop_length=hop)[0]
     for s0, e0 in zip(cuts[:-1], cuts[1:]):
-        # 無音なしで max_sec を超える長い発話は、仕方なく等分する
+        # 無音なしで max_sec を超える長い発話は、等分する位置の前後 1.5 秒で一番静かな所で切る
         n = max(1, int(np.ceil((e0 - s0) / (max_sec * sr))))
         step = (e0 - s0) // n
-        out += [(s0 + i * step, e0 if i == n - 1 else s0 + (i + 1) * step) for i in range(n)]
+        pts = [s0]
+        for i in range(1, n):
+            a, b = (s0 + i * step - int(1.5 * sr)) // hop, (s0 + i * step + int(1.5 * sr)) // hop
+            pts.append(int((a + int(np.argmin(rms[a:b]))) * hop))
+        pts.append(e0)
+        out += list(zip(pts[:-1], pts[1:]))
     return out
 
 
