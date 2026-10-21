@@ -258,6 +258,14 @@ def render_job(job):
     return [msg, [s["file"] for s in slots], job] + updates
 
 
+def job_running(job) -> bool:
+    return bool(job) and _sep_status(job).get("state") == "running"
+
+
+def training_alive(sid) -> bool:
+    return bool(sid) and _alive(read_status(VOICES / sid).get("pid"))
+
+
 def tick_job(job, shown):
     """5 秒ごと: 処理中は進み具合だけ更新。完了した瞬間に一度だけ結果を出す（チェックを消さないため）。"""
     if not job or job == shown:
@@ -1168,10 +1176,16 @@ with gr.Blocks(title="Voice Studio") as demo:
 
     spk_outputs = [x for pair in zip(spk_audio, spk_check) for x in pair]
     job_outputs = [sep_info, sep_paths, sep_shown] + spk_outputs
-    sep_btn.click(start_separate, [target, sep_files, sep_urls, dereverb, denoise, speakers], sep_job)
-    sep_job.change(render_job, sep_job, job_outputs)
+    # 自動更新（タイマー）は、取り込み・学習・精度検証が動いている間だけ動かす。
+    # 何もしていないときに 5 秒ごとに問い合わせると、スマホで画面がちらつくため
+    job_timer = gr.Timer(5, active=False)
+    sep_btn.click(start_separate, [target, sep_files, sep_urls, dereverb, denoise, speakers], sep_job).then(
+        lambda: gr.Timer(active=True), None, job_timer)
+    sep_job.change(render_job, sep_job, job_outputs).then(
+        lambda j: gr.Timer(active=job_running(j)), sep_job, job_timer)
     # 自動更新は「読み込み中」の点滅を出さない（スマホで 5 秒ごとに画面がちらついていた）
-    gr.Timer(5).tick(tick_job, [sep_job, sep_shown], job_outputs, show_progress="hidden")
+    job_timer.tick(tick_job, [sep_job, sep_shown], job_outputs, show_progress="hidden").then(
+        lambda j: gr.Timer(active=job_running(j)), sep_job, job_timer)
     save_btn.click(save_material, [target, new_name, new_icon, sep_shown, sep_paths, uploads] + spk_check,
                    [target, cur, gallery, add_title, new_fields, save_btn, raw_info, uploads, title,
                     clean_box, clean_md, clean_state])
@@ -1184,7 +1198,13 @@ with gr.Blocks(title="Voice Studio") as demo:
                     status)
     stop_btn.click(stop_training, target, status)
     train_shown = gr.State(None)
-    gr.Timer(5).tick(refresh, [target, train_shown], [status, log, train_shown], show_progress="hidden")
+    train_timer = gr.Timer(5, active=False)
+    start_btn.click(lambda: gr.Timer(active=True), None, train_timer)
+    train_timer.tick(refresh, [target, train_shown], [status, log, train_shown], show_progress="hidden").then(
+        lambda sid: gr.Timer(active=training_alive(sid)), target, train_timer)
+    # 「育てる」を開いたら、学習の状態を一度出し、学習中ならタイマーを動かす（育てる対象 = 今の話者）
+    grow_btn.click(lambda sid: (*refresh(sid)[:2], gr.Timer(active=training_alive(sid))), cur,
+                   [status, log, train_timer])
 
     conv_btn.click(do_convert, [cur, src, steps, auto_pitch, semitone] + conv_fx,
                    [conv_out, conv_file, conv_info, conv_raw]).then(history_choices, cur, hist)
@@ -1217,7 +1237,10 @@ with gr.Blocks(title="Voice Studio") as demo:
     bench_stop_btn.click(bench_stop, None, bench_outputs)
     bench_adopt_btn.click(bench_adopt, None, bench_outputs)
     bench_shown = gr.State(None)
-    gr.Timer(60).tick(bench_tick, bench_shown, bench_outputs + [bench_shown], show_progress="hidden")
+    bench_timer = gr.Timer(60, active=False)
+    bench_start_btn.click(lambda: gr.Timer(active=True), None, bench_timer)
+    bench_timer.tick(bench_tick, bench_shown, bench_outputs + [bench_shown], show_progress="hidden").then(
+        lambda: gr.Timer(active=bench_running()), None, bench_timer)
     clean_btn.click(cleanup_separated, clean_days, disk_info)
 
     def _on_load(sid):
@@ -1226,7 +1249,7 @@ with gr.Blocks(title="Voice Studio") as demo:
                 (i["name"] if i else ""), speaker_title(sid), *_after_select(sid))
 
     demo.load(_on_load, cur, [gallery, ckpt, sep_job, set_name, title] + after_outputs)
-    demo.load(bench_view, None, bench_outputs)
+    demo.load(bench_view, None, bench_outputs).then(lambda: gr.Timer(active=bench_running()), None, bench_timer)
 
 
 if __name__ == "__main__":
