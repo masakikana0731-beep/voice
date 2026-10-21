@@ -335,7 +335,8 @@ def save_material(target, name, icon_file, job, paths, uploads, *checks):
 
 # ---------------------------------------------------------------- STEP4: 学習
 
-def start_training(sid, size, tts_epochs, vc_steps, do_tts, do_vc, use_purity=False, purity=0.55, eval_sim=False):
+def start_training(sid, size, tts_epochs, vc_steps, do_tts, do_vc, auto_select=True, use_purity=False, purity=0.55,
+                   eval_sim=False):
     if not sid:
         raise gr.Error("先に STEP3 で話者を保存してください")
     vdir = voice_dir(sid)
@@ -344,7 +345,7 @@ def start_training(sid, size, tts_epochs, vc_steps, do_tts, do_vc, use_purity=Fa
     if not any(p.suffix.lower() in AUDIO_EXT for p in (vdir / "raw").iterdir()):
         raise gr.Error("素材がありません（STEP1〜3）")
     cmd = [str(PY), "-m", "studio.train", sid, "--size", size,
-           "--tts-epochs", str(int(tts_epochs)), "--vc-steps", str(int(vc_steps))]
+           "--tts-epochs", str(int(tts_epochs)), "--vc-steps", str(int(vc_steps)), "--select", str(int(bool(auto_select)))]
     if not do_tts:
         cmd += ["--skip", "tts"]
     if not do_vc:
@@ -1095,6 +1096,7 @@ with gr.Blocks(title="Voice Studio") as demo:
             vc_steps = gr.Slider(500, 20000, value=int(train_defaults().get("vc", {}).get("steps", 3000)), step=500, label="声変換の学習ステップ数")
             do_tts = gr.Checkbox(True, label="文章読み上げを学習する")
             do_vc = gr.Checkbox(True, label="声変換（とリアルタイム用）を学習する")
+            auto_select = gr.Checkbox(True, label="素材を自動で選ぶ（相手の声が混ざった部分・雑音の強い部分を外す。3〜4 分）")
         with gr.Group(visible=test_mode()) as t1:
             gr.Markdown("**🧪 テスト機能**")
             with gr.Row():
@@ -1160,7 +1162,8 @@ with gr.Blocks(title="Voice Studio") as demo:
     clean_all_btn.click(cleanup_all, clean_state, [clean_box, sep_job])
     clean_keep_btn.click(lambda: gr.update(visible=False), None, clean_box)
 
-    start_btn.click(start_training, [target, size, tts_epochs, vc_steps, do_tts, do_vc, use_purity, purity, eval_sim],
+    start_btn.click(start_training, [target, size, tts_epochs, vc_steps, do_tts, do_vc, auto_select, use_purity, purity,
+                                     eval_sim],
                     status)
     stop_btn.click(stop_training, target, status)
     gr.Timer(5).tick(refresh, target, [status, log])

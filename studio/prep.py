@@ -97,6 +97,8 @@ def main() -> int:
     ap.add_argument("voice")
     ap.add_argument("--language", default="japanese")
     ap.add_argument("--purity", type=float, default=0, help="（テスト機能）登録済みの声との近さがこれ未満のクリップを除外。0 で無効")
+    ap.add_argument("--select", type=int, default=1,
+                    help="1 なら素材を自動で選ぶ（別の声が混ざった・雑音の強いクリップを外す。24 分で 3〜4 分）")
     args = ap.parse_args()
 
     vdir = VOICES / args.voice
@@ -161,8 +163,28 @@ def main() -> int:
         if why:
             dropped.append(f"{n}: {why} | {t[:40]}")
             texts[i] = ""
+    if args.select:
+        # 素材の自動選別（studio/select_clips.py）: 別の声が混ざったクリップ・雑音の強いクリップを外す。
+        # 声変換は clips_hq/ のファイルをそのまま学習に使うので、ファイルごと clips_dropped/ へ移す
+        from studio.select_clips import choose, score_clips
+
+        write_status(vdir, stage="prep", message="素材を選んでいます（相手の声・雑音の強い部分を外す）")
+        try:
+            drop = choose(vdir, score_clips(vdir))
+        except Exception as e:  # 採点役が動かなくても学習は続ける
+            print(f"[prep] 素材の選別を飛ばしました: {e}", flush=True)
+            drop = {}
+        shutil.rmtree(vdir / "clips_dropped", ignore_errors=True)
+        (vdir / "clips_dropped").mkdir()
+        names = [n for n, _ in clips]
+        for n, why in drop.items():
+            dropped.append(f"{n}: {why}")
+            texts[names.index(n)] = ""
+            shutil.move(str(vdir / "clips_hq" / n), vdir / "clips_dropped" / n)
+            (vdir / "clips" / n).unlink(missing_ok=True)
+        print(f"[prep] 素材の選別で除外: {len(drop)} クリップ", flush=True)
     (vdir / "dropped.txt").write_text("\n".join(dropped), encoding="utf-8")
-    print(f"[prep] 書き起こし失敗で除外: {len(dropped)} クリップ", flush=True)
+    print(f"[prep] 除外（書き起こし失敗・素材の選別）: 合計 {len(dropped)} クリップ", flush=True)
 
     # 参照音声: 8 秒に一番近い、書き起こしのあるクリップ
     ok = [(n, d) for (n, d), t in zip(clips, texts) if t]

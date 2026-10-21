@@ -28,6 +28,7 @@ def main() -> int:
     ap.add_argument("--ref", nargs="+", required=True)
     ap.add_argument("-o", "--out", required=True)
     ap.add_argument("--no-mos", action="store_true")
+    ap.add_argument("--reps", type=int, default=5, help="自然さを何回測って平均するか（素材選びは 1 で速く）")
     a = ap.parse_args()
 
     paths = list(a.paths) + (Path(a.list).read_text(encoding="utf-8").splitlines() if a.list else [])
@@ -53,7 +54,7 @@ def main() -> int:
             # 乱数を固定し、5 回の平均にする
             torch.manual_seed(0)
             np.random.seed(0)
-            pred = model.predict(data=y, sr=16000, verbose=False, num_repetitions=5)
+            pred = model.predict(data=y, sr=16000, verbose=False, num_repetitions=a.reps)
             result[name]["mos"] = round(float(np.ravel(pred)[0]), 4)
     Path(a.out).write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"[judge] {len(result)} 件", flush=True)

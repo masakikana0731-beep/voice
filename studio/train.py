@@ -25,6 +25,7 @@ def main() -> int:
     ap.add_argument("--rt-steps", type=int, default=2500, help="リアルタイム用モデルの学習ステップ数")
     ap.add_argument("--purity", type=float, default=0, help="（テスト機能）混ざりの除外のしきい値")
     ap.add_argument("--eval-sim", action="store_true", help="（テスト機能）採点に声の近さも使う")
+    ap.add_argument("--select", type=int, default=1, help="1 なら素材を自動で選ぶ（別の声・雑音の強いクリップを外す）")
     ap.add_argument("--skip", action="append", default=[], choices=["prep", "tts", "vc", "rt"])
     args = ap.parse_args()
 
@@ -36,7 +37,8 @@ def main() -> int:
         write_status(vdir, stage="error", error=f"{what}で失敗しました。train.log を確認してください", pid=None)
         return 1
 
-    if "prep" not in args.skip and run_logged([PY, "-m", "studio.prep", args.voice, "--purity", args.purity], log) != 0:
+    if "prep" not in args.skip and run_logged([PY, "-m", "studio.prep", args.voice, "--purity", args.purity,
+                                                     "--select", args.select], log) != 0:
         return fail("データ準備")
     if "prep" not in args.skip:
         # 読み上げの「息継ぎ」に使う、本物の息の音を素材から取り出しておく（失敗しても学習は続ける）
