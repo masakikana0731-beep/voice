@@ -884,7 +884,8 @@ def _safe(fn, *a):
 def finish_controls():
     """仕上げの設定欄（声変換・読み上げ共通）。"""
     with gr.Accordion("🎛 仕上げ（クリーンアップ・リップノイズ・響き・環境）", open=False):
-        ai_clean = gr.Checkbox(False, label="✨ AI クリーンアップ（変換で出るザラつき・雑音を取る。+10秒ほど）")
+        # 実測: 似ている度は変わらず、自然さ（AI の採点）が 1.98 → 2.18 に上がる（studio/vc_lab.py）ので最初からオン
+        ai_clean = gr.Checkbox(True, label="✨ AI クリーンアップ（変換で出るザラつき・雑音を取る。+10秒ほど）")
         preset = gr.Dropdown(post.PRESETS, value="なし", label="環境（プリセット）")
         with gr.Row():
             lips = gr.Slider(0, 100, value=30, step=5, label="リップノイズ（話し始めの口の音）")

@@ -67,7 +67,7 @@ def unload_asr() -> None:
     torch.cuda.empty_cache()
 
 
-def judge(paths, refs, mos: bool = True, reps: int = 5) -> dict:
+def judge(paths, refs, mos: bool = True, reps: int = 5, print_cache=None) -> dict:
     """似ている度と自然さ（studio/judge.py を .venv-sep で）。{ファイル名: {"sim", "mos"}}
     ファイル名が重なると上書きされるので、呼び出し側で名前を分けておく。"""
     with tempfile.TemporaryDirectory() as tmp:
@@ -76,6 +76,8 @@ def judge(paths, refs, mos: bool = True, reps: int = 5) -> dict:
         lst.write_text("\n".join(str(Path(p).resolve()) for p in paths), encoding="utf-8")
         cmd = [str(SEP_PY), "-m", "studio.judge", "--list", str(lst),
                "--ref", *[str(Path(r).resolve()) for r in refs], "-o", str(res), "--reps", str(reps)] + ([] if mos else ["--no-mos"])
+        if print_cache:
+            cmd += ["--print-cache", str(Path(print_cache).resolve())]
         r = subprocess.run(cmd, cwd=ROOT, env=child_env(), capture_output=True, text=True, encoding="utf-8",
                            errors="replace", creationflags=subprocess.CREATE_NO_WINDOW)
         if r.returncode != 0:

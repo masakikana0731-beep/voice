@@ -413,11 +413,42 @@ def warm_vc(voice: str) -> None:
         _vc_request({"warm": True, "checkpoint": str(model[0]), "config": str(model[1])})
 
 
+# 何回変換して選ぶか。あゆみんで実測: 1 回 平均 83.8 点 → 3 回から選ぶ 87.4 点（studio/vc_lab.py、本物 = 100）。
+# 2 回目以降の変換は 1 区間 1〜3 秒なので、3 回でも待ちは 10〜20 秒ほど増えるだけ
+BEST_OF = 3
+
+
+def _pick_best(voice: str, tmp: Path, n: int, best_of: int) -> list[Path]:
+    """区切りごとに、本人の声にいちばん似ている変換結果を選ぶ（似ている度だけで選ぶ。自然さの採点は遅いため）。"""
+    from studio import quality
+
+    dirs = [tmp / "converted"] + [tmp / f"converted{k}" for k in range(1, best_of)]
+    cand = tmp / "cands"
+    cand.mkdir()
+    files = []
+    for k, d in enumerate(dirs):
+        for i in range(n):
+            if (d / f"{i:03d}.wav").exists():
+                dst = cand / f"k{k}__{i:03d}.wav"
+                shutil.copy(d / f"{i:03d}.wav", dst)
+                files.append(dst)
+    vdir = VOICES / voice
+    refs = sorted((vdir / "raw").glob("*.wav")) or [vdir / "ref_hq.wav"]
+    try:
+        j = quality.judge(files, refs, mos=False, print_cache=vdir / "voiceprint.npy")
+    except Exception as e:  # 採点役が動かなければ 1 回目の結果を使う
+        print(f"[convert] 選べませんでした（1 回目を使います）: {e}", flush=True)
+        return [dirs[0] / f"{i:03d}.wav" for i in range(n)]
+    return [max((f for f in files if f.name.endswith(f"__{i:03d}.wav")), key=lambda f: j[f.name]["sim"])
+            for i in range(n)]
+
+
 def convert(voice: str, source: str, steps: int | None = None, auto_pitch: bool = True, semitone: int = 0,
-            name: str = "vc") -> tuple[Path, str]:
+            name: str = "vc", best_of: int | None = None) -> tuple[Path, str]:
     """録音を学習した声に変換する。抑揚（声の高さの動き）・間はそのまま残る。
 
     無音で 15 秒以下に区切って変換し、つなぎ直す（Seed-VC 内部の区切りで音が途切れるのを防ぐ）。
+    best_of 回（省略時は BEST_OF 回）変換して、区切りごとに一番似ているものを選ぶ。
     """
     import soundfile as sf
 
@@ -445,12 +476,18 @@ def convert(voice: str, source: str, steps: int | None = None, auto_pitch: bool 
             sf.write(seg_dir / f"{i:03d}.wav", y[s0:e0], sr)
 
         how = "学習済みモデル" if model else "未学習（参照音声からのゼロショット変換）"
-        _vc_request({"segments": str(seg_dir), "target": str(ref), "out": str(out_dir), "steps": int(steps),
-                     "auto_pitch": bool(auto_pitch), "semitone": int(semitone), "cfg": float(st.get("cfg", 0.7)),
-                     "checkpoint": str(model[0]) if model else None, "config": str(model[1]) if model else None})
+        req = {"segments": str(seg_dir), "target": str(ref), "steps": int(steps),
+               "auto_pitch": bool(auto_pitch), "semitone": int(semitone), "cfg": float(st.get("cfg", 0.7)),
+               "checkpoint": str(model[0]) if model else None, "config": str(model[1]) if model else None}
+        best_of = BEST_OF if best_of is None else max(1, int(best_of))
+        for k in range(best_of):  # 変換は毎回少しずつ違うので、何回か変換して区切りごとに一番似ているものを選ぶ
+            _vc_request({**req, "out": str(out_dir if k == 0 else tmp / f"converted{k}")})
         outs = [out_dir / f"{i:03d}.wav" for i in range(len(spans))]
         if not all(f.exists() for f in outs):
             raise RuntimeError("声変換に失敗しました（結果のファイルがありません）")
+        if best_of > 1:
+            outs = _pick_best(voice, tmp, len(spans), best_of)
+            how += f" / {best_of} 回変換して一番似ているものを選択"
 
         # つなぎ目は無音の中なので、10ms だけ重ねてなめらかにつなぐ
         fade = int(0.01 * sr)
@@ -489,7 +526,8 @@ def sing(voice: str, source: str, separate: bool = True, semitone: int = 0, acco
         else:
             vocal, accomp = Path(source), None
         # 歌は音の高さを話者に合わせない（メロディが変わってしまうため）。高さは半音単位で手動で変える
-        conv, info = convert(voice, str(vocal), auto_pitch=False, semitone=semitone, name="sing_voice")
+        conv, info = convert(voice, str(vocal), auto_pitch=False, semitone=semitone, name="sing_voice",
+                             best_of=1)  # 曲は長いので 1 回だけ
         v, sr = sf.read(conv, dtype="float32")
         if accomp is not None and accomp.exists():
             a, asr = sf.read(accomp, dtype="float32", always_2d=True)

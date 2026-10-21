@@ -36,7 +36,8 @@ def main() -> int:
     ap.add_argument("--lips", type=int, default=30)
     ap.add_argument("--semitone", type=int, default=0)
     ap.add_argument("--no-separate", action="store_true")
-    ap.add_argument("--clean", action="store_true", help="AI クリーンアップをかける")
+    ap.add_argument("--clean", action="store_true", help="（互換用。いまは最初から AI クリーンアップをかける）")
+    ap.add_argument("--no-clean", action="store_true", help="AI クリーンアップをかけない")
     a = ap.parse_args()
 
     if a.cmd == "list":
@@ -68,7 +69,7 @@ def main() -> int:
         else:
             out, info = engine.sing(sid, a.input, separate=not a.no_separate, semitone=a.semitone)
         if a.cmd != "sing":
-            out = post.apply(out, a.preset, lips=a.lips, ai_clean=a.clean)
+            out = post.apply(out, a.preset, lips=a.lips, ai_clean=not a.no_clean)
     except PermissionError as e:
         print(f"ERROR={e}")
         return 3

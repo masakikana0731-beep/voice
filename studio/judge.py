@@ -29,10 +29,18 @@ def main() -> int:
     ap.add_argument("-o", "--out", required=True)
     ap.add_argument("--no-mos", action="store_true")
     ap.add_argument("--reps", type=int, default=5, help="自然さを何回測って平均するか（素材選びは 1 で速く）")
+    ap.add_argument("--print-cache", help="本物の声の特徴の保存先（.npy）。本物の声のファイルより新しければ使い回す")
     a = ap.parse_args()
 
     paths = list(a.paths) + (Path(a.list).read_text(encoding="utf-8").splitlines() if a.list else [])
-    ref = voice_print(a.ref)
+    cache = Path(a.print_cache) if a.print_cache else None
+    newest = max(Path(r).stat().st_mtime for r in a.ref)
+    if cache and cache.exists() and cache.stat().st_mtime > newest:
+        ref = np.load(cache)  # 素材 30 分を毎回聞き直すと 10 秒以上かかるので使い回す
+    else:
+        ref = voice_print(a.ref)
+        if cache:
+            np.save(cache, ref)
     result = {}
     waves = {}
     for p in map(Path, filter(None, paths)):
