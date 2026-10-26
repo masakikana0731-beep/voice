@@ -1,6 +1,6 @@
 """Voice Studio Live（PC 専用の拡張画面）: リアルタイム声変換を通話アプリのマイクに流す。
 
-  python -m studio.live     →  http://127.0.0.1:7880（この PC だけ。スマホ・ネットからは開けない）
+  python -m studio.live     →  http://127.0.0.1:7890（この PC だけ。スマホ・ネットからは開けない。使用中なら次の空き番号）
 
 - 話者データは Voice Studio と同じ voices/ をそのまま使う
 - 「本人の同意」の記録がある話者だけ使える（記録は話者ごとに meta.json の consent に保存）
@@ -19,7 +19,7 @@ import gradio as gr
 from studio import speakers as spk
 from studio.common import ROOT, SEEDVC, VOICES, child_env
 
-PORT = 7880
+PORT = 7890  # 7880 は SD Studio（ComfyUI のスマホ用アプリ）が使うようになったので移した
 RT_CONFIG = SEEDVC / "configs" / "inuse" / "config.json"
 VB_CABLE_URL = "https://vb-audio.com/Cable/"
 HOSTAPI = "MME"
@@ -287,6 +287,16 @@ if __name__ == "__main__":
 
     from studio import style
 
+    import socket
+
+    def free_port(start):
+        """start から順に、空いている番号を探す（ほかのアプリと取り合って起動できなくならないように）。"""
+        for p in range(start, start + 20):
+            with socket.socket() as sk:
+                if sk.connect_ex(("127.0.0.1", p)) != 0:
+                    return p
+        return start
+
     # この PC の中だけで待ち受ける（Tailscale の中継もしない）
-    demo.queue().launch(server_name="127.0.0.1", server_port=PORT, inbrowser="--no-browser" not in sys.argv,
+    demo.queue().launch(server_name="127.0.0.1", server_port=free_port(PORT), inbrowser="--no-browser" not in sys.argv,
                         allowed_paths=[str(VOICES.resolve())], css=style.CSS, theme=style.theme("red"))
